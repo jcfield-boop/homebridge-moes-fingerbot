@@ -89,17 +89,36 @@ class MoesFingerbotAccessory {
       
       let retryCount = 0;
       let scanningInProgress = false;
-      
+      let scanTimeout = null;
+
+      const discoverHandler = async (peripheral) => {
+        if (peripheral.address === this.address) {
+          this.log(`Found Fingerbot: ${peripheral.address}`);
+          clearTimeout(scanTimeout);
+          noble.stopScanning();
+          noble.removeListener('discover', discoverHandler);
+          scanningInProgress = false;
+
+          try {
+            await this.connectAndPress(peripheral);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        }
+      };
+
       const startScan = () => {
         if (scanningInProgress) return;
-        
         scanningInProgress = true;
+        noble.on('discover', discoverHandler);
         noble.startScanning([], true);
-        
-        const scanTimeout = setTimeout(() => {
+
+        scanTimeout = setTimeout(() => {
           noble.stopScanning();
+          noble.removeListener('discover', discoverHandler);
           scanningInProgress = false;
-          
+
           if (retryCount < this.scanRetries) {
             retryCount++;
             this.log(`Scan attempt ${retryCount} failed, retrying...`);
@@ -108,25 +127,8 @@ class MoesFingerbotAccessory {
             reject(new Error('Failed to find Fingerbot device after multiple attempts'));
           }
         }, this.scanDuration);
-        
-        noble.on('discover', async (peripheral) => {
-          if (peripheral.address === this.address) {
-            this.log(`Found Fingerbot: ${peripheral.address}`);
-            
-            clearTimeout(scanTimeout);
-            noble.stopScanning();
-            scanningInProgress = false;
-            
-            try {
-              await this.connectAndPress(peripheral);
-              resolve();
-            } catch (error) {
-              reject(error);
-            }
-          }
-        });
       };
-      
+
       startScan();
     });
   }
@@ -151,6 +153,11 @@ class MoesFingerbotAccessory {
           }
           
           this.log(`Discovered ${services.length} services and ${characteristics.length} characteristics`);
+
+          // Log all characteristics and their properties for debugging
+          characteristics.forEach(char => {
+            this.log(`Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
+          });
           
           // Look for writable characteristics
           const writableChars = characteristics.filter(char => {
@@ -171,32 +178,43 @@ class MoesFingerbotAccessory {
           ];
           
           try {
+            let success = false;
             for (let i = 0; i < writableChars.length; i++) {
               const char = writableChars[i];
-              
+
               for (let j = 0; j < commands.length; j++) {
                 const cmd = commands[j];
-                
-                this.log(`Trying command ${cmd.toString('hex')} on characteristic ${char.uuid}`);
-                
+                const startTime = Date.now();
+
+                this.log(`[DEBUG] Trying command ${cmd.toString('hex')} on characteristic ${char.uuid} (properties: ${JSON.stringify(char.properties)})`);
+
                 try {
                   await this.writeCharacteristic(char, cmd);
-                  this.log(`Command sent successfully`);
-                  
+                  const elapsed = Date.now() - startTime;
+                  this.log(`[DEBUG] Command ${cmd.toString('hex')} sent successfully on ${char.uuid} in ${elapsed}ms`);
+
                   // Wait for the specified press time
                   await new Promise(resolve => setTimeout(resolve, this.pressTime));
-                  
+
                   // Try to send a release command if needed
                   if (j === 3) { // For the full Tuya command with checksum
                     const releaseCmd = Buffer.from([0x55, 0xAA, 0x00, 0x06, 0x00, 0x05, 0x01, 0x01, 0x00, 0x00, 0x0D]);
                     await this.writeCharacteristic(char, releaseCmd);
-                    this.log('Release command sent');
+                    this.log('[DEBUG] Release command sent');
                   }
+
+                  // Mark as success and break out of loops
+                  if (!success) {
+                    this.log(`[DEBUG] SUCCESS: Command ${cmd.toString('hex')} on characteristic ${char.uuid} worked!`);
+                    success = true;
+                  }
+                  break;
                 } catch (error) {
-                  this.log(`Failed to send command: ${error}`);
+                  this.log(`[DEBUG] Failed to send command ${cmd.toString('hex')} on ${char.uuid}: ${error}`);
                   // Continue to the next command/characteristic
                 }
               }
+              if (success) break;
             }
             
             // Disconnect after all attempts, whether successful or not
