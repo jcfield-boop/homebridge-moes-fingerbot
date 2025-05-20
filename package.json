@@ -1,0 +1,25 @@
+{
+  "name": "homebridge-moes-fingerbot",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for MOES Fingerbot",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "fingerbot",
+    "moes",
+    "tuya"
+  ],
+  "engines": {
+    "node": ">=10.0.0",
+    "homebridge": ">=1.0.0"
+  },
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-15",
+    "debug": "^4.3.1"
+  },
+  "author": "Your Name",
+  "license": "ISC"
+}
