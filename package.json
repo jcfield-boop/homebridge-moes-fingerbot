@@ -12,6 +12,10 @@
     "moes",
     "tuya"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jcfield-boop/homebridge-moes-fingerbot.git"
+  },
   "engines": {
     "node": ">=10.0.0",
     "homebridge": ">=1.0.0"
