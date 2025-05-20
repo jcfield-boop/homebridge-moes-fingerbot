@@ -159,6 +159,18 @@ class MoesFingerbotAccessory {
             this.log(`Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
           });
           
+          // Log all readable characteristics and their values for battery discovery
+          const readableChars = characteristics.filter(char => char.properties.includes('read'));
+          for (const char of readableChars) {
+            char.read((error, data) => {
+              if (error) {
+                this.log(`[DEBUG] Failed to read from characteristic ${char.uuid}: ${error}`);
+              } else {
+                this.log(`[DEBUG] Read from characteristic ${char.uuid}: ${data.toString('hex')} (raw), ${data.readUInt8(0)} (as uint8)`);
+              }
+            });
+          }
+          
           // Look for writable characteristics
           const writableChars = characteristics.filter(char => {
             return (char.properties.includes('write') || char.properties.includes('writeWithoutResponse'));
