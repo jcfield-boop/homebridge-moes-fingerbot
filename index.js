@@ -145,6 +145,9 @@ class MoesFingerbotAccessory {
     });
   }
 
+  // PATCH: Ensure we subscribe to notifications on 2b10 BEFORE sending the status query command,
+  // and only send the status query if the notify characteristic is present.
+
   async connectAndPress(peripheral) {
     return new Promise((resolve, reject) => {
       this.log('Connecting to Fingerbot...');
@@ -164,7 +167,7 @@ class MoesFingerbotAccessory {
         this.log('[DEBUG] Connected, discovering all services...');
         peripheral.discoverSomeServicesAndCharacteristics(
           ['1910'],
-          ['2b11'],
+          ['2b11', '2b10'],
           (error, services, characteristics) => {
             if (error) {
               this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
@@ -203,8 +206,17 @@ class MoesFingerbotAccessory {
                 }
               });
               notifyChar.subscribe((err) => {
-                if (err) this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
-                else this.log('[DEBUG] Subscribed to 2b10 notifications');
+                if (err) {
+                  this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
+                } else {
+                  this.log('[DEBUG] Subscribed to 2b10 notifications');
+                  // Now send the status query command
+                  const statusCmd = Buffer.from('55aa00070008010100000010', 'hex');
+                  writeChar.write(statusCmd, false, (error) => {
+                    if (error) this.log(`[DEBUG] Status query write error: ${error}`);
+                    else this.log('[DEBUG] Status query command sent');
+                  });
+                }
               });
             }
 
@@ -239,12 +251,6 @@ class MoesFingerbotAccessory {
                   resolve();
                 });
               }, this.pressTime);
-            });
-
-            const statusCmd = Buffer.from('55aa00070008010100000010', 'hex');
-            writeChar.write(statusCmd, false, (error) => {
-              if (error) this.log(`[DEBUG] Status query write error: ${error}`);
-              else this.log('[DEBUG] Status query command sent');
             });
           }
         );
