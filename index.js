@@ -61,12 +61,12 @@ class MoesFingerbotAccessory {
         .then(() => {
           this.isOn = true;
           callback(null);
-          
-          // Auto turn off after a short delay
+
+          // Auto turn off after pressTime (make this configurable)
           setTimeout(() => {
             this.isOn = false;
             this.switchService.updateCharacteristic(Characteristic.On, false);
-          }, 1000); // Wait 1 second after command completion
+          }, this.pressTime); // Use this.pressTime instead of 1000
         })
         .catch(error => {
           this.log(`Error pressing button: ${error}`);
