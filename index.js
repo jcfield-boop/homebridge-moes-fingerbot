@@ -48,17 +48,31 @@ class MoesFingerbotAccessory {
 
   initDiscovery() {
     this.log('Starting initial scan for Fingerbot...');
-    noble.startScanning([], true);
+    let connecting = false;
 
-    noble.on('discover', async (peripheral) => {
-      if (peripheral.address === this.address) {
+    const discoverHandler = async (peripheral) => {
+      if (peripheral.address === this.address && !connecting) {
+        connecting = true;
         this.log(`Discovered Fingerbot at startup: ${peripheral.address}`);
         noble.stopScanning();
-        this.peripheral = peripheral;
-        await this.cacheCharacteristics(peripheral);
-        this.ready = true;
+        noble.removeListener('discover', discoverHandler);
+        try {
+          this.peripheral = peripheral;
+          await this.cacheCharacteristics(peripheral);
+          this.ready = true;
+        } catch (err) {
+          this.log(`Startup connection error: ${err}`);
+          // Optionally, restart scan after a delay
+          setTimeout(() => {
+            connecting = false;
+            noble.startScanning([], true);
+          }, 5000);
+        }
       }
-    });
+    };
+
+    noble.on('discover', discoverHandler);
+    noble.startScanning([], true);
   }
 
   async cacheCharacteristics(peripheral) {
