@@ -164,23 +164,33 @@ class MoesFingerbotAccessory {
             this.log(`  Service UUID: ${service.uuid}`);
           });
 
-          // Log all discovered characteristics with properties
           this.log(`[DEBUG] Discovered characteristics:`);
           characteristics.forEach(char => {
-            this.log(`[DEBUG] Characteristic: ${JSON.stringify(char, null, 2)}`);
+            this.log(`[DEBUG] Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
           });
-          
-          // Log all readable characteristics and their values for battery discovery
           const readableChars = characteristics.filter(char => char.properties.includes('read'));
           for (const char of readableChars) {
             char.read((error, data) => {
               if (error) {
                 this.log(`[DEBUG] Failed to read from characteristic ${char.uuid}: ${error}`);
               } else {
-                this.log(`[DEBUG] Read from characteristic ${char.uuid}: ${data.toString('hex')} (raw), ${data.readUInt8(0)} (as uint8)`);
+                this.log(`[DEBUG] Read from characteristic ${char.uuid}: ${data.toString('hex')} (raw), ${data.readUInt8(0)} (as uint8), ${data.toString('utf8')} (as utf8)`);
               }
             });
           }
+          const notifyChars = characteristics.filter(char => char.properties.includes('notify'));
+          notifyChars.forEach(char => {
+            char.on('data', (data, isNotification) => {
+              this.log(`[DEBUG] Notification from ${char.uuid}: ${data.toString('hex')}`);
+            });
+            char.subscribe((err) => {
+              if (err) this.log(`[DEBUG] Failed to subscribe to ${char.uuid}: ${err}`);
+              else this.log(`[DEBUG] Subscribed to notifications on ${char.uuid}`);
+            });
+          });
+          peripheral.on('disconnect', () => {
+            this.log('[DEBUG] Peripheral disconnected');
+          });
           
           // Look for writable characteristics
           const writableChars = characteristics.filter(char => {
@@ -248,6 +258,10 @@ class MoesFingerbotAccessory {
             reject(error);
           }
         });
+      });
+
+      peripheral.on('disconnect', () => {
+        this.log('[DEBUG] Peripheral disconnected');
       });
     });
   }
