@@ -2,79 +2,67 @@
   "pluginAlias": "MoesFingerbot",
   "pluginType": "accessory",
   "singular": true,
-  "schema": [
-    {
-      "type": "text",
-      "title": "Name",
-      "key": "name",
-      "required": true,
-      "default": "Fingerbot"
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "title": "Name",
+        "required": true,
+        "default": "Fingerbot"
+      },
+      "address": {
+        "type": "string",
+        "title": "Bluetooth Address",
+        "required": true,
+        "placeholder": "DC:23:51:B7:71:33"
+      },
+      "pressTime": {
+        "type": "number",
+        "title": "Press Time (ms)",
+        "default": 3000,
+        "minimum": 100,
+        "maximum": 10000
+      },
+      "scanDuration": {
+        "type": "number",
+        "title": "Scan Duration (ms)",
+        "default": 5000,
+        "minimum": 1000,
+        "maximum": 30000
+      },
+      "scanRetries": {
+        "type": "number",
+        "title": "Scan Retries",
+        "default": 3,
+        "minimum": 0,
+        "maximum": 10
+      },
+      "scanRetryCooldown": {
+        "type": "number",
+        "title": "Scan Retry Cooldown (ms)",
+        "default": 1000,
+        "minimum": 100,
+        "maximum": 10000
+      },
+      "debug": {
+        "type": "boolean",
+        "title": "Enable Debug Logging",
+        "default": false
+      },
+      "commandCharacteristics": {
+        "type": "string",
+        "title": "Custom Command Characteristic UUIDs",
+        "description": "Comma-separated list of characteristic UUIDs to try for sending commands (e.g., ffe1,ffe2). Leave blank for default.",
+        "placeholder": "ffe1,ffe2"
+      },
+      "batteryCharacteristic": {
+        "type": "string",
+        "title": "Battery Level Characteristic UUID",
+        "description": "Characteristic UUID to use for battery level (e.g., ffe2). Leave blank to auto-detect.",
+        "placeholder": "ffe2"
+      }
     },
-    {
-      "type": "text",
-      "title": "Bluetooth Address",
-      "key": "address",
-      "required": true,
-      "placeholder": "DC:23:51:B7:71:33"
-    },
-    {
-      "type": "section",
-      "title": "Advanced Options",
-      "expandable": true,
-      "items": [
-        {
-          "type": "number",
-          "title": "Press Time (ms)",
-          "key": "pressTime",
-          "default": 3000,
-          "minimum": 100,
-          "maximum": 10000
-        },
-        {
-          "type": "number",
-          "title": "Scan Duration (ms)",
-          "key": "scanDuration",
-          "default": 5000,
-          "minimum": 1000,
-          "maximum": 30000
-        },
-        {
-          "type": "number",
-          "title": "Scan Retries",
-          "key": "scanRetries",
-          "default": 3,
-          "minimum": 0,
-          "maximum": 10
-        },
-        {
-          "type": "number",
-          "title": "Scan Retry Cooldown (ms)",
-          "key": "scanRetryCooldown",
-          "default": 1000,
-          "minimum": 100,
-          "maximum": 10000
-        },
-        {
-          "type": "checkbox",
-          "title": "Enable Debug Logging",
-          "key": "debug",
-          "default": false
-        },
-        {
-          "type": "text",
-          "title": "Custom Command Characteristic UUIDs",
-          "description": "Comma-separated list of characteristic UUIDs to try for sending commands (e.g., ffe1,ffe2). Leave blank for default.",
-          "key": "commandCharacteristics",
-          "placeholder": "ffe1,ffe2"
-        },
-        {
-          "type": "text",
-          "title": "Battery Level Characteristic UUID",
-          "description": "Characteristic UUID to use for battery level (e.g., ffe2). Leave blank to auto-detect.",
-          "key": "batteryCharacteristic",
-          "placeholder": "ffe2"
-        }
-      ]
-    }
-  ]
+    "required": ["name", "address"]
+  }
 }
