@@ -8,8 +8,7 @@
       "title": "Name",
       "key": "name",
       "required": true,
-      "default": "Fingerbot",
-      "placeholder": "Fingerbot"
+      "default": "Fingerbot"
     },
     {
       "type": "text",
@@ -66,16 +65,14 @@
           "title": "Custom Command Characteristic UUIDs",
           "description": "Comma-separated list of characteristic UUIDs to try for sending commands (e.g., ffe1,ffe2). Leave blank for default.",
           "key": "commandCharacteristics",
-          "placeholder": "ffe1,ffe2",
-          "required": false
+          "placeholder": "ffe1,ffe2"
         },
         {
           "type": "text",
           "title": "Battery Level Characteristic UUID",
           "description": "Characteristic UUID to use for battery level (e.g., ffe2). Leave blank to auto-detect.",
           "key": "batteryCharacteristic",
-          "placeholder": "ffe2",
-          "required": false
+          "placeholder": "ffe2"
         }
       ]
     }
