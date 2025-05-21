@@ -19,18 +19,18 @@
       "placeholder": "DC:23:51:B7:71:33"
     },
     {
-      "type": "number",
-      "title": "Press Time (ms)",
-      "key": "pressTime",
-      "default": 3000,
-      "minimum": 100,
-      "maximum": 10000
-    },
-    {
       "type": "section",
       "title": "Advanced Options",
       "expandable": true,
       "items": [
+        {
+          "type": "number",
+          "title": "Press Time (ms)",
+          "key": "pressTime",
+          "default": 3000,
+          "minimum": 100,
+          "maximum": 10000
+        },
         {
           "type": "number",
           "title": "Scan Duration (ms)",
