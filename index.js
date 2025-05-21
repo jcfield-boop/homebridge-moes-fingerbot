@@ -206,23 +206,17 @@ class MoesFingerbotAccessory {
       
       peripheral.connect(async (error) => {
         if (error) {
-          this.log(`Connection error: ${error}`);
+          this.log(`[DEBUG] Connection error: ${error}`);
           return reject(error);
         }
-        
-        this.log('Connected, discovering services...');
-        
+        this.log('[DEBUG] Connected, discovering services...');
         peripheral.discoverAllServicesAndCharacteristics(async (error, services, characteristics) => {
           if (error) {
             this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
-            return;
+            return reject(error);
           }
-
-          // Log all discovered services
-          this.log(`[DEBUG] Discovered services:`);
-          services.forEach(service => {
-            this.log(`  Service UUID: ${service.uuid}`);
-          });
+          this.log(`[DEBUG] Discovered services: ${services.length}`);
+          // ...rest of your logging...
 
           this.log(`[DEBUG] Discovered characteristics:`);
           characteristics.forEach(char => {
