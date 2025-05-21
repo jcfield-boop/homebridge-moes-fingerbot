@@ -189,6 +189,25 @@ class MoesFingerbotAccessory {
               return reject(new Error('No writable characteristic (2b11) found'));
             }
 
+            const notifyChar = characteristics.find(char => char.uuid === '2b10' && char.properties.includes('notify'));
+            if (notifyChar) {
+              notifyChar.on('data', (data, isNotification) => {
+                this.log(`[DEBUG] Notification from 2b10: ${data.toString('hex')}`);
+                // Try to parse battery info from data here
+              });
+              notifyChar.subscribe((err) => {
+                if (err) this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
+                else this.log('[DEBUG] Subscribed to 2b10 notifications');
+              });
+            }
+
+            const readChars = characteristics.filter(char => char.properties.includes('read'));
+            for (const char of readChars) {
+              char.read((err, data) => {
+                if (!err) this.log(`[DEBUG] Read from ${char.uuid}: ${data.toString('hex')}`);
+              });
+            }
+
             // Send press command
             const pressCmd = Buffer.from('55aa00060005010100010e', 'hex');
             writeChar.write(pressCmd, false, (error) => {
