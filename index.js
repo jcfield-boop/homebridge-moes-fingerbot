@@ -193,7 +193,14 @@ class MoesFingerbotAccessory {
             if (notifyChar) {
               notifyChar.on('data', (data, isNotification) => {
                 this.log(`[DEBUG] Notification from 2b10: ${data.toString('hex')}`);
-                // Try to parse battery info from data here
+                // Parse battery info from status response
+                if (data.length > 2 && data[0] === 0x55 && data[1] === 0xaa && data[3] === 0x07) {
+                  // Battery is second-to-last byte
+                  const battery = data[data.length - 2];
+                  this.log(`[DEBUG] Parsed battery level: ${battery}%`);
+                  this.batteryLevel = battery;
+                  this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, battery);
+                }
               });
               notifyChar.subscribe((err) => {
                 if (err) this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
@@ -232,6 +239,12 @@ class MoesFingerbotAccessory {
                   resolve();
                 });
               }, this.pressTime);
+            });
+
+            const statusCmd = Buffer.from('55aa00070008010100000010', 'hex');
+            writeChar.write(statusCmd, false, (error) => {
+              if (error) this.log(`[DEBUG] Status query write error: ${error}`);
+              else this.log('[DEBUG] Status query command sent');
             });
           }
         );
