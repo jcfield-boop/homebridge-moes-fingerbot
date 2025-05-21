@@ -196,9 +196,7 @@ class MoesFingerbotAccessory {
             if (notifyChar) {
               notifyChar.on('data', (data, isNotification) => {
                 this.log(`[DEBUG] Notification from 2b10: ${data.toString('hex')}`);
-                // Parse battery info from status response
                 if (data.length > 2 && data[0] === 0x55 && data[1] === 0xaa && data[3] === 0x07) {
-                  // Battery is second-to-last byte
                   const battery = data[data.length - 2];
                   this.log(`[DEBUG] Parsed battery level: ${battery}%`);
                   this.batteryLevel = battery;
@@ -210,12 +208,43 @@ class MoesFingerbotAccessory {
                   this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
                 } else {
                   this.log('[DEBUG] Subscribed to 2b10 notifications');
-                  // Now send the status query command
-                  const statusCmd = Buffer.from('55aa00070008010100000010', 'hex');
-                  writeChar.write(statusCmd, false, (error) => {
-                    if (error) this.log(`[DEBUG] Status query write error: ${error}`);
-                    else this.log('[DEBUG] Status query command sent');
-                  });
+                  // Wait briefly to ensure subscription is active
+                  setTimeout(() => {
+                    // Send status query command
+                    const statusCmd = Buffer.from('55aa00070008010100000010', 'hex');
+                    this.log('[DEBUG] Sending status query command...');
+                    writeChar.write(statusCmd, false, (error) => {
+                      if (error) this.log(`[DEBUG] Status query write error: ${error}`);
+                      else this.log('[DEBUG] Status query command sent');
+                    });
+                    // Send press command
+                    const pressCmd = Buffer.from('55aa00060005010100010e', 'hex');
+                    this.log('[DEBUG] Sending press command...');
+                    writeChar.write(pressCmd, false, (error) => {
+                      if (error) {
+                        this.log(`[DEBUG] Write error: ${error}`);
+                        this.connecting = false;
+                        peripheral.disconnect();
+                        return reject(error);
+                      }
+                      this.log('[DEBUG] Press command sent, waiting...');
+                      setTimeout(() => {
+                        // Send release command
+                        const releaseCmd = Buffer.from('55aa00060005010100000d', 'hex');
+                        this.log('[DEBUG] Sending release command...');
+                        writeChar.write(releaseCmd, false, (error) => {
+                          this.connecting = false;
+                          peripheral.disconnect();
+                          if (error) {
+                            this.log(`[DEBUG] Release write error: ${error}`);
+                            return reject(error);
+                          }
+                          this.log('[DEBUG] Release command sent, done.');
+                          resolve();
+                        });
+                      }, this.pressTime);
+                    });
+                  }, 200); // 200ms delay after subscribing
                 }
               });
             }
@@ -226,32 +255,6 @@ class MoesFingerbotAccessory {
                 if (!err) this.log(`[DEBUG] Read from ${char.uuid}: ${data.toString('hex')}`);
               });
             }
-
-            // Send press command
-            const pressCmd = Buffer.from('55aa00060005010100010e', 'hex');
-            writeChar.write(pressCmd, false, (error) => {
-              if (error) {
-                this.log(`[DEBUG] Write error: ${error}`);
-                this.connecting = false;
-                peripheral.disconnect();
-                return reject(error);
-              }
-              this.log('[DEBUG] Press command sent, waiting...');
-              setTimeout(() => {
-                // Send release command
-                const releaseCmd = Buffer.from('55aa00060005010100000d', 'hex');
-                writeChar.write(releaseCmd, false, (error) => {
-                  this.connecting = false;
-                  peripheral.disconnect();
-                  if (error) {
-                    this.log(`[DEBUG] Release write error: ${error}`);
-                    return reject(error);
-                  }
-                  this.log('[DEBUG] Release command sent, done.');
-                  resolve();
-                });
-              }, this.pressTime);
-            });
           }
         );
       });
