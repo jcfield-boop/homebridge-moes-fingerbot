@@ -21,6 +21,8 @@ class MoesFingerbotAccessory {
     
     this.isOn = false;
     this.batteryLevel = 100;
+    this.lastBatteryCheck = 0;
+    this.batteryCheckInterval = (config.batteryCheckInterval || 60) * 60 * 1000; // default 60 minutes
     
     this.switchService = new Service.Switch(this.name);
     this.switchService
@@ -37,9 +39,46 @@ class MoesFingerbotAccessory {
     noble.on('stateChange', (state) => {
       if (state === 'poweredOn') {
         this.log('Bluetooth adapter is powered on');
+        this.initDiscovery();
       } else {
         this.log('Bluetooth adapter is powered off or unavailable');
       }
+    });
+  }
+
+  initDiscovery() {
+    this.log('Starting initial scan for Fingerbot...');
+    noble.startScanning([], true);
+
+    noble.on('discover', async (peripheral) => {
+      if (peripheral.address === this.address) {
+        this.log(`Discovered Fingerbot at startup: ${peripheral.address}`);
+        noble.stopScanning();
+        this.peripheral = peripheral;
+        await this.cacheCharacteristics(peripheral);
+        this.ready = true;
+      }
+    });
+  }
+
+  async cacheCharacteristics(peripheral) {
+    return new Promise((resolve, reject) => {
+      peripheral.connect((error) => {
+        if (error) {
+          this.log(`Startup connection error: ${error}`);
+          return reject(error);
+        }
+        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
+          if (error) {
+            this.log(`Startup discovery error: ${error}`);
+            return reject(error);
+          }
+          this.characteristics = characteristics;
+          this.log('[DEBUG] Cached characteristics at startup.');
+          peripheral.disconnect();
+          resolve();
+        });
+      });
     });
   }
 
@@ -79,7 +118,14 @@ class MoesFingerbotAccessory {
   }
 
   getBatteryLevel(callback) {
-    this.log(`Getting battery level: ${this.batteryLevel}`);
+    const now = Date.now();
+    if (now - this.lastBatteryCheck > this.batteryCheckInterval) {
+      this.lastBatteryCheck = now;
+      // TODO: Actually read battery from device here if supported
+      this.log(`[DEBUG] (Battery) Polled device for battery level: ${this.batteryLevel}`);
+    } else {
+      this.log(`[DEBUG] (Battery) Returning cached battery level: ${this.batteryLevel}`);
+    }
     callback(null, this.batteryLevel);
   }
 

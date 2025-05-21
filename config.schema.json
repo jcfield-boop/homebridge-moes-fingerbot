@@ -61,6 +61,13 @@
         "title": "Battery Level Characteristic UUID",
         "description": "Characteristic UUID to use for battery level (e.g., ffe2). Leave blank to auto-detect.",
         "placeholder": "ffe2"
+      },
+      "batteryCheckInterval": {
+        "type": "number",
+        "title": "Battery Poll Interval (minutes)",
+        "default": 60,
+        "minimum": 1,
+        "maximum": 1440
       }
     },
     "required": ["name", "address"]
