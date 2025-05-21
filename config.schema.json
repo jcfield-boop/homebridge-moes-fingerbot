@@ -22,7 +22,7 @@
         "title": "Press Time (ms)",
         "default": 3000,
         "minimum": 100,
-        "maximum": 10000
+        "maximum": 100000
       },
       "scanDuration": {
         "type": "number",

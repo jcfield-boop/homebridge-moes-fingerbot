@@ -167,7 +167,7 @@ class MoesFingerbotAccessory {
           // Log all discovered characteristics with properties
           this.log(`[DEBUG] Discovered characteristics:`);
           characteristics.forEach(char => {
-            this.log(`  Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
+            this.log(`[DEBUG] Characteristic: ${JSON.stringify(char, null, 2)}`);
           });
           
           // Log all readable characteristics and their values for battery discovery
