@@ -23,6 +23,7 @@ class MoesFingerbotAccessory {
     this.batteryLevel = 100;
     this.lastBatteryCheck = 0;
     this.batteryCheckInterval = (config.batteryCheckInterval || 60) * 60 * 1000; // default 60 minutes
+    this.connecting = false; // Add a flag at the class level
     
     this.switchService = new Service.Switch(this.name);
     this.switchService
@@ -204,15 +205,24 @@ class MoesFingerbotAccessory {
     return new Promise((resolve, reject) => {
       this.log('Connecting to Fingerbot...');
       
+      // Check if already connecting
+      if (this.connecting) {
+        this.log('[DEBUG] Already connecting, skipping new attempt.');
+        return;
+      }
+      this.connecting = true;
+
       peripheral.connect(async (error) => {
         if (error) {
           this.log(`[DEBUG] Connection error: ${error}`);
+          this.connecting = false;
           return reject(error);
         }
         this.log('[DEBUG] Connected, discovering services...');
         peripheral.discoverAllServicesAndCharacteristics(async (error, services, characteristics) => {
           if (error) {
             this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
+            this.connecting = false;
             return reject(error);
           }
           this.log(`[DEBUG] Discovered services: ${services.length}`);
@@ -253,6 +263,7 @@ class MoesFingerbotAccessory {
           
           if (writableChars.length === 0) {
             peripheral.disconnect();
+            this.connecting = false;
             return reject(new Error('No writable characteristics found'));
           }
           
@@ -306,9 +317,11 @@ class MoesFingerbotAccessory {
             
             // Disconnect after all attempts, whether successful or not
             peripheral.disconnect();
+            this.connecting = false;
             resolve();
           } catch (error) {
             peripheral.disconnect();
+            this.connecting = false;
             reject(error);
           }
         });
