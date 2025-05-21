@@ -94,6 +94,13 @@ class MoesFingerbotAccessory {
       const discoverHandler = async (peripheral) => {
         if (peripheral.address === this.address) {
           this.log(`Found Fingerbot: ${peripheral.address}`);
+          this.log(`[DEBUG] Peripheral details: ${JSON.stringify({
+            id: peripheral.id,
+            address: peripheral.address,
+            advertisement: peripheral.advertisement,
+            rssi: peripheral.rssi,
+            state: peripheral.state
+          }, null, 2)}`);
           clearTimeout(scanTimeout);
           noble.stopScanning();
           noble.removeListener('discover', discoverHandler);
@@ -153,7 +160,8 @@ class MoesFingerbotAccessory {
           }
           
           this.log(`Discovered ${services.length} services and ${characteristics.length} characteristics`);
-
+          this.log(`[DEBUG] Services: ${services.map(s => s.uuid).join(', ')}`);
+this.log(`[DEBUG] Characteristics: ${characteristics.map(c => c.uuid).join(', ')}`);
           // Log all characteristics and their properties for debugging
           characteristics.forEach(char => {
             this.log(`Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
@@ -243,21 +251,27 @@ class MoesFingerbotAccessory {
 
   async writeCharacteristic(characteristic, data) {
     return new Promise((resolve, reject) => {
+      this.log(`[DEBUG] Attempting to write to characteristic ${characteristic.uuid} with data: ${data.toString('hex')}`);
       if (characteristic.properties.includes('write')) {
         characteristic.write(data, true, (error) => {
           if (error) {
+            this.log(`[DEBUG] Write error on ${characteristic.uuid}: ${error}`);
             return reject(error);
           }
+          this.log(`[DEBUG] Write success on ${characteristic.uuid}`);
           resolve();
         });
       } else if (characteristic.properties.includes('writeWithoutResponse')) {
         characteristic.write(data, false, (error) => {
           if (error) {
+            this.log(`[DEBUG] WriteWithoutResponse error on ${characteristic.uuid}: ${error}`);
             return reject(error);
           }
+          this.log(`[DEBUG] WriteWithoutResponse success on ${characteristic.uuid}`);
           resolve();
         });
       } else {
+        this.log(`[DEBUG] Characteristic ${characteristic.uuid} is not writable`);
         reject(new Error('Characteristic is not writable'));
       }
     });
