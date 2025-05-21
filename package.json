@@ -1,6 +1,6 @@
 {
   "name": "homebridge-moes-fingerbot",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Homebridge plugin for MOES Fingerbot",
   "main": "index.js",
   "scripts": {
