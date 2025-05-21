@@ -162,56 +162,60 @@ class MoesFingerbotAccessory {
           return reject(error);
         }
         this.log('[DEBUG] Connected, discovering all services...');
-        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-          if (error) {
-            this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
-            this.connecting = false;
-            peripheral.disconnect();
-            return reject(error);
-          }
-          this.log(`[DEBUG] Discovered services: ${services.length}`);
-          services.forEach(s => this.log(`[DEBUG] Service UUID: ${s.uuid}`));
-          this.log(`[DEBUG] Discovered characteristics:`);
-          characteristics.forEach(c => this.log(`[DEBUG] Characteristic UUID: ${c.uuid}, properties: ${JSON.stringify(c.properties)}`));
-
-          // Try to find the writable characteristic (ffe1 or similar)
-          const writeChar = characteristics.find(char =>
-            char.properties.includes('write') || char.properties.includes('writeWithoutResponse')
-          );
-
-          if (!writeChar) {
-            this.log('[DEBUG] No writable characteristic found');
-            this.connecting = false;
-            peripheral.disconnect();
-            return reject(new Error('No writable characteristic found'));
-          }
-
-          // Send press command
-          const pressCmd = Buffer.from('55aa00060005010100010e', 'hex');
-          writeChar.write(pressCmd, false, (error) => {
+        peripheral.discoverSomeServicesAndCharacteristics(
+          ['1910'],
+          ['2b11'],
+          (error, services, characteristics) => {
             if (error) {
-              this.log(`[DEBUG] Write error: ${error}`);
+              this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
               this.connecting = false;
               peripheral.disconnect();
               return reject(error);
             }
-            this.log('[DEBUG] Press command sent, waiting...');
-            setTimeout(() => {
-              // Send release command
-              const releaseCmd = Buffer.from('55aa00060005010100000d', 'hex');
-              writeChar.write(releaseCmd, false, (error) => {
+            this.log(`[DEBUG] Discovered services: ${services.length}`);
+            this.log(`[DEBUG] Discovered characteristics:`);
+            characteristics.forEach(char => {
+              this.log(`[DEBUG] Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
+            });
+
+            const writeChar = characteristics.find(char =>
+              char.uuid === '2b11' && (char.properties.includes('write') || char.properties.includes('writeWithoutResponse'))
+            );
+
+            if (!writeChar) {
+              this.log('[DEBUG] No writable characteristic (2b11) found');
+              this.connecting = false;
+              peripheral.disconnect();
+              return reject(new Error('No writable characteristic (2b11) found'));
+            }
+
+            // Send press command
+            const pressCmd = Buffer.from('55aa00060005010100010e', 'hex');
+            writeChar.write(pressCmd, false, (error) => {
+              if (error) {
+                this.log(`[DEBUG] Write error: ${error}`);
                 this.connecting = false;
                 peripheral.disconnect();
-                if (error) {
-                  this.log(`[DEBUG] Release write error: ${error}`);
-                  return reject(error);
-                }
-                this.log('[DEBUG] Release command sent, done.');
-                resolve();
-              });
-            }, this.pressTime);
-          });
-        });
+                return reject(error);
+              }
+              this.log('[DEBUG] Press command sent, waiting...');
+              setTimeout(() => {
+                // Send release command
+                const releaseCmd = Buffer.from('55aa00060005010100000d', 'hex');
+                writeChar.write(releaseCmd, false, (error) => {
+                  this.connecting = false;
+                  peripheral.disconnect();
+                  if (error) {
+                    this.log(`[DEBUG] Release write error: ${error}`);
+                    return reject(error);
+                  }
+                  this.log('[DEBUG] Release command sent, done.');
+                  resolve();
+                });
+              }, this.pressTime);
+            });
+          }
+        );
       });
 
       peripheral.on('disconnect', () => {
