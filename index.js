@@ -154,17 +154,20 @@ class MoesFingerbotAccessory {
         
         peripheral.discoverAllServicesAndCharacteristics(async (error, services, characteristics) => {
           if (error) {
-            this.log(`Discovery error: ${error}`);
-            peripheral.disconnect();
-            return reject(error);
+            this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
+            return;
           }
-          
-          this.log(`Discovered ${services.length} services and ${characteristics.length} characteristics`);
-          this.log(`[DEBUG] Services: ${services.map(s => s.uuid).join(', ')}`);
-this.log(`[DEBUG] Characteristics: ${characteristics.map(c => c.uuid).join(', ')}`);
-          // Log all characteristics and their properties for debugging
+
+          // Log all discovered services
+          this.log(`[DEBUG] Discovered services:`);
+          services.forEach(service => {
+            this.log(`  Service UUID: ${service.uuid}`);
+          });
+
+          // Log all discovered characteristics with properties
+          this.log(`[DEBUG] Discovered characteristics:`);
           characteristics.forEach(char => {
-            this.log(`Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
+            this.log(`  Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
           });
           
           // Log all readable characteristics and their values for battery discovery
