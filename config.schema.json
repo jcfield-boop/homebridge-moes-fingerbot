@@ -2,8 +2,8 @@
   "pluginAlias": "MoesFingerbot",
   "pluginType": "accessory",
   "singular": false,
-  "headerDisplay": "Homebridge plugin for MOES Fingerbot devices. For basic setup, only name and address are required.",
-  "footerDisplay": "For help finding your device address, use a Bluetooth scanner app or check the Homebridge logs when scanning.",
+  "headerDisplay": "Homebridge plugin for MOES Fingerbot devices. Device ID and Local Key are required for Tuya BLE communication.",
+  "footerDisplay": "For help finding your device address, use a Bluetooth scanner app. Use tuya-local-key-extractor or similar tools to get your Device ID and Local Key.",
   "schema": {
     "type": "object",
     "properties": {
@@ -21,6 +21,18 @@
         "pattern": "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$",
         "description": "The Bluetooth MAC address of your Fingerbot device (format: XX:XX:XX:XX:XX:XX)"
       },
+      "deviceId": {
+        "title": "Device ID",
+        "type": "string",
+        "required": true,
+        "description": "Tuya device ID (required for encrypted BLE communication)"
+      },
+      "localKey": {
+        "title": "Local Key",
+        "type": "string",
+        "required": true,
+        "description": "Tuya local encryption key (required for encrypted BLE communication)"
+      },
       "pressTime": {
         "title": "Press Duration",
         "type": "integer",
@@ -35,16 +47,6 @@
         "expandable": true,
         "expanded": false,
         "properties": {
-          "deviceId": {
-            "title": "Device ID",
-            "type": "string",
-            "description": "Tuya device ID (optional, for encrypted communication)"
-          },
-          "localKey": {
-            "title": "Local Key",
-            "type": "string",
-            "description": "Tuya local encryption key (optional, for encrypted communication)"
-          },
           "scanDuration": {
             "title": "Scan Duration",
             "type": "integer",
@@ -80,7 +82,7 @@
         }
       }
     },
-    "required": ["name", "address"]
+    "required": ["name", "address", "deviceId", "localKey"]
   },
   "layout": [
     {
@@ -89,7 +91,27 @@
       "expandable": false,
       "items": [
         "name",
-        "address",
+        "address"
+      ]
+    },
+    {
+      "type": "section",
+      "title": "Tuya Authentication",
+      "expandable": false,
+      "items": [
+        {
+          "type": "help",
+          "helpvalue": "<em>These credentials are required for Tuya BLE communication. Use tuya-local-key-extractor or similar tools to obtain them.</em>"
+        },
+        "deviceId",
+        "localKey"
+      ]
+    },
+    {
+      "type": "section",
+      "title": "Button Settings",
+      "expandable": false,
+      "items": [
         "pressTime"
       ]
     },
@@ -101,10 +123,8 @@
       "items": [
         {
           "type": "help",
-          "helpvalue": "<em>These settings are optional and only needed for specific device configurations or troubleshooting.</em>"
+          "helpvalue": "<em>These settings are optional and only needed for troubleshooting connection issues.</em>"
         },
-        "advanced.deviceId",
-        "advanced.localKey",
         {
           "type": "section",
           "title": "Scanning Options",
@@ -131,21 +151,20 @@
   "form": [
     "name",
     "address",
-    "pressTime",
     {
       "type": "fieldset",
-      "title": "Tuya Authentication (Optional)",
-      "expandable": true,
-      "expanded": false,
+      "title": "Tuya Authentication (Required)",
+      "expandable": false,
       "items": [
         {
           "type": "help",
-          "helpvalue": "Only fill these if your device requires Tuya cloud authentication. Most devices work without these settings."
+          "helpvalue": "These credentials are required for encrypted BLE communication with your Fingerbot device."
         },
-        "advanced.deviceId",
-        "advanced.localKey"
+        "deviceId",
+        "localKey"
       ]
     },
+    "pressTime",
     {
       "type": "fieldset", 
       "title": "Connection Settings",
