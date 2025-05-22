@@ -20,9 +20,9 @@ class MoesFingerbotAccessory {
     this.deviceId = config.advanced?.deviceId || config.deviceId;
     this.localKey = config.advanced?.localKey || config.localKey;
     this.pressTime = config.advanced?.pressTime || config.pressTime || 3000;
-    this.scanDuration = config.advanced?.scanDuration || config.scanDuration || 5000;
+    this.scanDuration = config.advanced?.scanDuration || config.scanDuration || 8000; // Increased
     this.scanRetries = config.advanced?.scanRetries || config.scanRetries || 3;
-    this.scanRetryCooldown = config.advanced?.scanRetryCooldown || config.scanRetryCooldown || 1000;
+    this.scanRetryCooldown = config.advanced?.scanRetryCooldown || config.scanRetryCooldown || 2000; // Increased
     this.batteryCheckInterval = (config.advanced?.batteryCheckInterval || config.batteryCheckInterval || 60) * 60 * 1000;
 
     this.sequenceNumber = 0;
@@ -34,7 +34,7 @@ class MoesFingerbotAccessory {
     this.lastBatteryCheck = 0;
     this.connecting = false;
     this.currentOperation = null;
-    this.currentPeripheral = null; // Track current peripheral
+    this.currentPeripheral = null;
 
     this.switchService = new Service.Switch(this.name);
     this.switchService
@@ -50,10 +50,9 @@ class MoesFingerbotAccessory {
     noble.on('stateChange', (state) => {
       if (state === 'poweredOn') {
         this.log('Bluetooth adapter is powered on');
-        // PATCH: Proactive scan and service discovery on startup
         setTimeout(() => {
           this.validateDeviceOnStartup();
-        }, 2000); // Wait a bit for Homebridge to finish initializing
+        }, 2000);
       } else {
         this.log('Bluetooth adapter is powered off or unavailable');
         this.forceDisconnect();
@@ -74,7 +73,6 @@ class MoesFingerbotAccessory {
     this.log(`Setting power state to: ${value}`);
 
     if (value) {
-      // Check if already processing
       if (this.currentOperation) {
         this.log('[DEBUG] Operation already in progress, ignoring new request');
         callback(new Error('Operation in progress'));
@@ -114,7 +112,6 @@ class MoesFingerbotAccessory {
     callback(null, this.batteryLevel >= 0 && this.batteryLevel <= 100 ? this.batteryLevel : 0);
   }
 
-  // Force disconnect any existing peripheral
   forceDisconnect() {
     if (this.currentPeripheral) {
       try {
@@ -129,64 +126,53 @@ class MoesFingerbotAccessory {
     this.isAuthenticated = false;
   }
 
-  generateSessionKey() {
-    if (!this.localKey || !this.deviceId) {
-      this.log('[DEBUG] Missing localKey or deviceId for session key generation');
-      return null;
-    }
-
-    try {
-      const hash = crypto.createHash('md5');
-      hash.update(this.localKey + this.deviceId);
-      this.sessionKey = hash.digest();
-      this.log(`[DEBUG] Generated session key: ${this.sessionKey.toString('hex')}`);
-      return this.sessionKey;
-    } catch (error) {
-      this.log(`[DEBUG] Error generating session key: ${error}`);
-      return null;
-    }
+  // Try multiple command formats for different Fingerbot variants
+  createPressCommands() {
+    const commands = [
+      // Format 1: Simple byte command
+      Buffer.from([0x01]),
+      
+      // Format 2: Original format with header
+      this.buildRawCommand(0x06, Buffer.from([0x01])),
+      
+      // Format 3: Alternative Tuya format
+      Buffer.from([0x55, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01]),
+      
+      // Format 4: Simple press command
+      Buffer.from([0x57, 0x01]),
+      
+      // Format 5: Another variant
+      Buffer.from([0x50, 0x01, 0x01]),
+      
+      // Format 6: Hex command often used
+      Buffer.from([0xA0, 0x01]),
+    ];
+    
+    return commands;
   }
 
-  encryptTuyaCommand(commandType, data = Buffer.alloc(0)) {
-    if (!this.localKey) {
-      this.log('[DEBUG] No localKey set, using raw command');
-      return this.buildRawCommand(commandType, data);
-    }
-
-    try {
-      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFFFFFF;
-
-      const header = Buffer.from([0x55, 0xaa]);
-      const seqNum = Buffer.alloc(4);
-      seqNum.writeUInt32BE(this.sequenceNumber, 0);
-      const cmdType = Buffer.from([commandType]);
-      const length = Buffer.alloc(2);
-      length.writeUInt16BE(data.length + 8, 0);
-
-      const payload = Buffer.concat([seqNum, cmdType, length, data]);
+  createReleaseCommands() {
+    const commands = [
+      // Format 1: Simple byte command
+      Buffer.from([0x00]),
       
-      let key;
-      if (this.localKey.length === 32) {
-        key = Buffer.from(this.localKey, 'hex');
-      } else {
-        key = Buffer.alloc(16);
-        Buffer.from(this.localKey, 'utf8').copy(key);
-      }
-
-      const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
-      cipher.setAutoPadding(true);
-      const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
-
-      const checksum = this.calculateChecksum(Buffer.concat([header, encrypted]));
-      const finalCommand = Buffer.concat([header, encrypted, Buffer.from([checksum])]);
-
-      this.log(`[DEBUG] Encrypted command (type ${commandType}): ${finalCommand.toString('hex')}`);
-      return finalCommand;
-
-    } catch (error) {
-      this.log(`[DEBUG] Encryption error: ${error}, falling back to raw command`);
-      return this.buildRawCommand(commandType, data);
-    }
+      // Format 2: Original format with header
+      this.buildRawCommand(0x06, Buffer.from([0x00])),
+      
+      // Format 3: Alternative Tuya format
+      Buffer.from([0x55, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00]),
+      
+      // Format 4: Simple release command
+      Buffer.from([0x57, 0x00]),
+      
+      // Format 5: Another variant
+      Buffer.from([0x50, 0x01, 0x00]),
+      
+      // Format 6: Hex command often used
+      Buffer.from([0xA0, 0x00]),
+    ];
+    
+    return commands;
   }
 
   buildRawCommand(commandType, data = Buffer.alloc(0)) {
@@ -201,7 +187,6 @@ class MoesFingerbotAccessory {
     const checksum = this.calculateChecksum(payload);
     const finalCommand = Buffer.concat([payload, Buffer.from([checksum])]);
     
-    this.log(`[DEBUG] Raw command (type ${commandType}): ${finalCommand.toString('hex')}`);
     return finalCommand;
   }
 
@@ -213,21 +198,10 @@ class MoesFingerbotAccessory {
     return sum & 0xFF;
   }
 
-  createPressCommand() {
-    // Simplified press command - try different formats
-    return this.buildRawCommand(0x06, Buffer.from([0x01]));
-  }
-
-  createReleaseCommand() {
-    // Simplified release command
-    return this.buildRawCommand(0x06, Buffer.from([0x00]));
-  }
-
   async pressButton() {
     return new Promise((resolve, reject) => {
       this.log('Scanning for Fingerbot...');
 
-      // Force disconnect any existing connection first
       this.forceDisconnect();
 
       let retryCount = 0;
@@ -239,7 +213,6 @@ class MoesFingerbotAccessory {
           peripheralFound = true;
           this.log(`Found Fingerbot: ${peripheral.address}`);
           
-          // Stop scanning immediately
           try {
             noble.stopScanning();
           } catch (e) {
@@ -303,13 +276,11 @@ class MoesFingerbotAccessory {
         return reject(new Error('Already connecting'));
       }
 
-      // Check if peripheral is already connected
       if (peripheral.state === 'connected') {
         this.log('[DEBUG] Peripheral already connected, disconnecting first...');
         try {
           peripheral.disconnect();
-          // Wait a moment before reconnecting
-          setTimeout(() => this.connectAndPress(peripheral).then(resolve).catch(reject), 1000);
+          setTimeout(() => this.connectAndPress(peripheral).then(resolve).catch(reject), 2000);
           return;
         } catch (e) {
           this.log(`[DEBUG] Error disconnecting existing connection: ${e}`);
@@ -318,11 +289,8 @@ class MoesFingerbotAccessory {
 
       this.connecting = true;
       this.currentPeripheral = peripheral;
-
-      // Reset authentication state
       this.isAuthenticated = false;
       this.sequenceNumber = 0;
-      this.sessionKey = null;
 
       let connectionTimeout = null;
       let disconnectHandler = null;
@@ -340,7 +308,7 @@ class MoesFingerbotAccessory {
       };
 
       disconnectHandler = () => {
-        this.log('[DEBUG] Peripheral disconnected');
+        this.log('[DEBUG] Peripheral disconnected unexpectedly');
         this.currentPeripheral = null;
         cleanup();
         reject(new Error('Device disconnected during operation'));
@@ -353,7 +321,7 @@ class MoesFingerbotAccessory {
         cleanup();
         this.forceDisconnect();
         reject(new Error('Connection timeout'));
-      }, 15000);
+      }, 20000); // Increased timeout
 
       peripheral.connect((error) => {
         if (error) {
@@ -363,8 +331,9 @@ class MoesFingerbotAccessory {
           return reject(error);
         }
 
-        this.log('[DEBUG] Connected, waiting before service discovery...');
+        this.log('[DEBUG] Connected successfully, waiting before service discovery...');
         
+        // Longer wait to ensure device is ready
         setTimeout(() => {
           if (peripheral.state !== 'connected') {
             this.log('[DEBUG] Device disconnected before service discovery');
@@ -388,13 +357,14 @@ class MoesFingerbotAccessory {
               return reject(new Error('Device disconnected during service discovery'));
             }
 
+            // Extend timeout for operation
             clearTimeout(connectionTimeout);
             connectionTimeout = setTimeout(() => {
               this.log('[DEBUG] Operation timeout');
               cleanup();
               this.forceDisconnect();
               reject(new Error('Operation timeout'));
-            }, 8000); // Reduced timeout
+            }, 15000);
 
             this.handleDiscoveredCharacteristics(services, characteristics, peripheral, () => {
               cleanup();
@@ -404,7 +374,7 @@ class MoesFingerbotAccessory {
               reject(error);
             });
           });
-        }, 1000); // Reduced delay
+        }, 2000); // Longer delay
       });
     });
   }
@@ -418,11 +388,6 @@ class MoesFingerbotAccessory {
       return reject(new Error('No characteristics found'));
     }
 
-    characteristics.forEach(char => {
-      this.log(`[DEBUG] Characteristic: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
-    });
-
-    // Look for write characteristic (prioritize 2b11)
     const writeChar = characteristics.find(char => char.uuid === '2b11') ||
                      characteristics.find(char => char.properties.includes('writeWithoutResponse')) ||
                      characteristics.find(char => char.properties.includes('write'));
@@ -441,66 +406,69 @@ class MoesFingerbotAccessory {
       this.log(`[DEBUG] Using notify characteristic: ${notifyChar.uuid}`);
     }
 
-    this.executeSimpleSequence(writeChar, notifyChar, peripheral, resolve, reject);
+    this.tryMultipleCommandFormats(writeChar, notifyChar, peripheral, resolve, reject);
   }
 
-  executeSimpleSequence(writeChar, notifyChar, peripheral, resolve, reject) {
-    // Simplified approach - skip authentication and notifications for now
-    this.log('[DEBUG] Starting simple press sequence...');
+  tryMultipleCommandFormats(writeChar, notifyChar, peripheral, resolve, reject) {
+    this.log('[DEBUG] Trying multiple command formats...');
 
-    // Check connection state
-    if (peripheral.state !== 'connected') {
-      this.log('[DEBUG] Device disconnected before sending commands');
-      return reject(new Error('Device disconnected'));
-    }
-
-    // Send simple press command
-    const pressCmd = this.createPressCommand();
-    this.log('[DEBUG] Sending simple press command...');
+    const pressCommands = this.createPressCommands();
+    const releaseCommands = this.createReleaseCommands();
     
-    writeChar.write(pressCmd, false, (error) => {
-      if (error) {
-        this.log(`[DEBUG] Press command error: ${error}`);
+    let commandIndex = 0;
+
+    const tryNextCommand = () => {
+      if (commandIndex >= pressCommands.length) {
+        this.log('[DEBUG] All command formats failed');
         this.forceDisconnect();
-        return reject(error);
+        return reject(new Error('All command formats failed'));
       }
 
-      this.log('[DEBUG] Press command sent successfully');
+      if (peripheral.state !== 'connected') {
+        this.log('[DEBUG] Device disconnected before sending commands');
+        return reject(new Error('Device disconnected'));
+      }
 
-      // Wait briefly then send release
-      setTimeout(() => {
-        if (peripheral.state !== 'connected') {
-          this.log('[DEBUG] Device disconnected before release');
-          return resolve(); // Still consider successful if press was sent
+      const pressCmd = pressCommands[commandIndex];
+      const releaseCmd = releaseCommands[commandIndex];
+      
+      this.log(`[DEBUG] Trying command format ${commandIndex + 1}: ${pressCmd.toString('hex')}`);
+      
+      writeChar.write(pressCmd, false, (error) => {
+        if (error) {
+          this.log(`[DEBUG] Command format ${commandIndex + 1} failed: ${error}`);
+          commandIndex++;
+          setTimeout(tryNextCommand, 500);
+          return;
         }
 
-        const releaseCmd = this.createReleaseCommand();
-        this.log('[DEBUG] Sending release command...');
-        
-        writeChar.write(releaseCmd, false, (error) => {
-          if (error) {
-            this.log(`[DEBUG] Release command error: ${error}`);
-          } else {
-            this.log('[DEBUG] Release command sent, sequence complete');
+        this.log(`[DEBUG] Command format ${commandIndex + 1} sent successfully`);
+
+        // Wait then send release command
+        setTimeout(() => {
+          if (peripheral.state !== 'connected') {
+            this.log('[DEBUG] Device disconnected before release');
+            return resolve(); // Consider successful if press was sent
           }
 
-          // Disconnect after brief delay
-          setTimeout(() => {
-            this.forceDisconnect();
-            resolve();
-          }, 300);
-        });
-      }, 100); // Very brief delay between press and release
-    });
-  }
+          writeChar.write(releaseCmd, false, (error) => {
+            if (error) {
+              this.log(`[DEBUG] Release command error: ${error}`);
+            } else {
+              this.log(`[DEBUG] Release command sent, sequence complete`);
+            }
 
-  handleNotification(data) {
-    try {
-      this.log(`[DEBUG] Received notification: ${data.toString('hex')}`);
-      // Battery parsing logic can be added here if needed
-    } catch (error) {
-      this.log(`[DEBUG] Error processing notification: ${error}`);
-    }
+            // Disconnect after brief delay
+            setTimeout(() => {
+              this.forceDisconnect();
+              resolve();
+            }, 500);
+          });
+        }, 200);
+      });
+    };
+
+    tryNextCommand();
   }
 
   async validateDeviceOnStartup() {
@@ -557,6 +525,6 @@ class MoesFingerbotAccessory {
       if (!found) {
         this.log('[DEBUG] [Startup] Could not find Fingerbot during initial scan');
       }
-    }, 8000);
+    }, 10000);
   }
 }
