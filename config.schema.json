@@ -1,66 +1,170 @@
 {
   "pluginAlias": "MoesFingerbot",
   "pluginType": "accessory",
-  "singular": true,
+  "singular": false,
+  "headerDisplay": "Homebridge plugin for MOES Fingerbot devices. For basic setup, only name and address are required.",
+  "footerDisplay": "For help finding your device address, use a Bluetooth scanner app or check the Homebridge logs when scanning.",
   "schema": {
     "type": "object",
     "properties": {
       "name": {
-        "type": "string",
         "title": "Name",
+        "type": "string",
+        "default": "MOES Fingerbot",
         "required": true,
-        "default": "Fingerbot"
+        "description": "The name of this accessory as it will appear in HomeKit"
       },
       "address": {
-        "type": "string",
         "title": "Bluetooth Address",
+        "type": "string",
         "required": true,
-        "placeholder": "DC:23:51:B7:71:33"
+        "pattern": "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$",
+        "description": "The Bluetooth MAC address of your Fingerbot device (format: XX:XX:XX:XX:XX:XX)"
       },
       "pressTime": {
-        "type": "number",
-        "title": "Press Time (ms)",
+        "title": "Press Duration",
+        "type": "integer",
         "default": 3000,
-        "minimum": 100,
-        "maximum": 100000
+        "minimum": 500,
+        "maximum": 10000,
+        "description": "How long the button stays 'pressed' in HomeKit (milliseconds)"
       },
-      "scanDuration": {
-        "type": "number",
-        "title": "Scan Duration (ms)",
-        "default": 5000,
-        "minimum": 1000,
-        "maximum": 30000
-      },
-      "scanRetries": {
-        "type": "number",
-        "title": "Scan Retries",
-        "default": 3,
-        "minimum": 0,
-        "maximum": 10
-      },
-      "scanRetryCooldown": {
-        "type": "number",
-        "title": "Scan Retry Cooldown (ms)",
-        "default": 1000,
-        "minimum": 100,
-        "maximum": 10000
-      },
-      "debug": {
-        "type": "boolean",
-        "title": "Enable Debug Logging",
-        "default": false
-      },
-      "deviceId": {
-        "title": "Device ID",
-        "type": "string",
-        "description": "The Tuya Device ID (Virtual ID) for your Fingerbot."
-      },
-      "localKey": {
-        "title": "Local Key",
-        "type": "string",
-        "description": "The 16-character Tuya Auth Key for encrypted BLE commands."
+      "advanced": {
+        "title": "Advanced Settings",
+        "type": "object",
+        "expandable": true,
+        "expanded": false,
+        "properties": {
+          "deviceId": {
+            "title": "Device ID",
+            "type": "string",
+            "description": "Tuya device ID (optional, for encrypted communication)"
+          },
+          "localKey": {
+            "title": "Local Key",
+            "type": "string",
+            "description": "Tuya local encryption key (optional, for encrypted communication)"
+          },
+          "scanDuration": {
+            "title": "Scan Duration",
+            "type": "integer",
+            "default": 5000,
+            "minimum": 1000,
+            "maximum": 30000,
+            "description": "How long to scan for the device (milliseconds)"
+          },
+          "scanRetries": {
+            "title": "Scan Retries",
+            "type": "integer",
+            "default": 3,
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Number of scan attempts before giving up"
+          },
+          "scanRetryCooldown": {
+            "title": "Retry Cooldown",
+            "type": "integer",
+            "default": 1000,
+            "minimum": 500,
+            "maximum": 10000,
+            "description": "Delay between scan retries (milliseconds)"
+          },
+          "batteryCheckInterval": {
+            "title": "Battery Check Interval",
+            "type": "integer",
+            "default": 60,
+            "minimum": 1,
+            "maximum": 1440,
+            "description": "How often to check battery level (minutes)"
+          }
+        }
       }
     },
     "required": ["name", "address"]
-  }
+  },
+  "layout": [
+    {
+      "type": "section",
+      "title": "Basic Configuration",
+      "expandable": false,
+      "items": [
+        "name",
+        "address",
+        "pressTime"
+      ]
+    },
+    {
+      "type": "section", 
+      "title": "Advanced Settings",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "type": "help",
+          "helpvalue": "<em>These settings are optional and only needed for specific device configurations or troubleshooting.</em>"
+        },
+        "advanced.deviceId",
+        "advanced.localKey",
+        {
+          "type": "section",
+          "title": "Scanning Options",
+          "expandable": true,
+          "expanded": false,
+          "items": [
+            "advanced.scanDuration",
+            "advanced.scanRetries", 
+            "advanced.scanRetryCooldown"
+          ]
+        },
+        {
+          "type": "section",
+          "title": "Battery Monitoring",
+          "expandable": true,
+          "expanded": false,
+          "items": [
+            "advanced.batteryCheckInterval"
+          ]
+        }
+      ]
+    }
+  ],
+  "form": [
+    "name",
+    "address",
+    "pressTime",
+    {
+      "type": "fieldset",
+      "title": "Tuya Authentication (Optional)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "type": "help",
+          "helpvalue": "Only fill these if your device requires Tuya cloud authentication. Most devices work without these settings."
+        },
+        "advanced.deviceId",
+        "advanced.localKey"
+      ]
+    },
+    {
+      "type": "fieldset", 
+      "title": "Connection Settings",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        "advanced.scanDuration",
+        "advanced.scanRetries",
+        "advanced.scanRetryCooldown"
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Battery Settings", 
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        "advanced.batteryCheckInterval"
+      ]
+    }
+  ]
 }
