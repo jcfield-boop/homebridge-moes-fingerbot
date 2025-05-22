@@ -1,5 +1,6 @@
 const noble = require('@abandonware/noble');
 const debug = require('debug')('homebridge-moes-fingerbot');
+const crypto = require('crypto'); // Add at the top of the file
 
 let Service, Characteristic;
 
@@ -14,15 +15,19 @@ class MoesFingerbotAccessory {
     this.log = log;
     this.name = config.name || 'MOES Fingerbot';
     this.address = config.address.toLowerCase();
-    this.pressTime = config.pressTime || 3000; // Default 3 seconds
+    this.pressTime = config.pressTime || 3000;
     this.scanDuration = config.scanDuration || 5000;
     this.scanRetries = config.scanRetries || 3;
     this.scanRetryCooldown = config.scanRetryCooldown || 1000;
 
+    // PATCH: Add deviceId and localKey from config
+    this.deviceId = config.deviceId;
+    this.localKey = config.localKey;
+
     this.isOn = false;
     this.batteryLevel = 100;
     this.lastBatteryCheck = 0;
-    this.batteryCheckInterval = (config.batteryCheckInterval || 60) * 60 * 1000; // default 60 minutes
+    this.batteryCheckInterval = (config.batteryCheckInterval || 60) * 60 * 1000;
     this.connecting = false;
 
     this.switchService = new Service.Switch(this.name);
@@ -86,6 +91,23 @@ class MoesFingerbotAccessory {
       this.log(`[DEBUG] (Battery) Returning cached battery level: ${this.batteryLevel}`);
     }
     callback(null, this.batteryLevel);
+  }
+
+  // PATCH: Tuya BLE encryption for commands
+  encryptTuyaCommand(buffer) {
+    if (!this.localKey) {
+      this.log('[DEBUG] No localKey set, sending raw command');
+      return buffer;
+    }
+    // Pad buffer to 16 bytes
+    const padded = Buffer.alloc(16, 0);
+    buffer.copy(padded);
+
+    const cipher = crypto.createCipheriv('aes-128-ecb', Buffer.from(this.localKey, 'utf8'), null);
+    cipher.setAutoPadding(false);
+    const encrypted = Buffer.concat([cipher.update(padded), cipher.final()]);
+    this.log(`[DEBUG] Encrypted payload: ${encrypted.toString('hex')}`);
+    return encrypted;
   }
 
   async pressButton() {
@@ -208,17 +230,15 @@ class MoesFingerbotAccessory {
                   this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
                 } else {
                   this.log('[DEBUG] Subscribed to 2b10 notifications');
-                  // Wait briefly to ensure subscription is active
                   setTimeout(() => {
-                    // Send status query command
-                    const statusCmd = Buffer.from('55aa00070008010100000010', 'hex');
+                    // PATCH: Encrypt commands before sending
+                    const statusCmd = this.encryptTuyaCommand(Buffer.from('55aa00070008010100000010', 'hex'));
                     this.log('[DEBUG] Sending status query command...');
                     writeChar.write(statusCmd, false, (error) => {
                       if (error) this.log(`[DEBUG] Status query write error: ${error}`);
                       else this.log('[DEBUG] Status query command sent');
                     });
-                    // Send press command
-                    const pressCmd = Buffer.from('55aa00060005010100010e', 'hex');
+                    const pressCmd = this.encryptTuyaCommand(Buffer.from('55aa00060005010100010e', 'hex'));
                     this.log('[DEBUG] Sending press command...');
                     writeChar.write(pressCmd, false, (error) => {
                       if (error) {
@@ -229,8 +249,7 @@ class MoesFingerbotAccessory {
                       }
                       this.log('[DEBUG] Press command sent, waiting...');
                       setTimeout(() => {
-                        // Send release command
-                        const releaseCmd = Buffer.from('55aa00060005010100000d', 'hex');
+                        const releaseCmd = this.encryptTuyaCommand(Buffer.from('55aa00060005010100000d', 'hex'));
                         this.log('[DEBUG] Sending release command...');
                         writeChar.write(releaseCmd, false, (error) => {
                           this.connecting = false;
@@ -244,7 +263,7 @@ class MoesFingerbotAccessory {
                         });
                       }, this.pressTime);
                     });
-                  }, 200); // 200ms delay after subscribing
+                  }, 200);
                 }
               });
             }
