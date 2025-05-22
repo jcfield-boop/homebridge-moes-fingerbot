@@ -912,63 +912,88 @@ class MoesFingerbotAccessory {
         return reject(new Error('Already connecting'));
       }
 
-      // Check if already connected and disconnect first
-      if (peripheral.state === 'connected') {
-        this.log('[DEBUG] Peripheral already connected, disconnecting first...');
-        try {
-          peripheral.disconnect();
-          setTimeout(() => {
-            this.connectAndPress(peripheral).then(resolve).catch(reject);
-          }, 1000);
-          return;
-        } catch (e) {
-          this.log(`[DEBUG] Error disconnecting: ${e}`);
-        }
+      // Always force disconnect first to ensure clean state
+      this.forceDisconnect();
+      
+      // Wait a moment for cleanup to complete
+      setTimeout(() => {
+        this.doConnection(peripheral, resolve, reject);
+      }, 1000);
+    });
+  }
+
+  doConnection(peripheral, resolve, reject) {
+    // Check if already connected and disconnect first
+    if (peripheral.state === 'connected') {
+      this.log('[DEBUG] Peripheral already connected, disconnecting first...');
+      try {
+        peripheral.disconnect();
+        setTimeout(() => {
+          this.doConnection(peripheral, resolve, reject);
+        }, 2000);
+        return;
+      } catch (e) {
+        this.log(`[DEBUG] Error disconnecting: ${e}`);
+      }
+    }
+
+    this.connecting = true;
+    this.currentPeripheral = peripheral;
+
+    let connectionTimeout = null;
+    let disconnectHandler = null;
+    let serviceTimeout = null;
+
+    const cleanup = () => {
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+        connectionTimeout = null;
+      }
+      if (serviceTimeout) {
+        clearTimeout(serviceTimeout);
+        serviceTimeout = null;
+      }
+      if (disconnectHandler) {
+        peripheral.removeListener('disconnect', disconnectHandler);
+        disconnectHandler = null;
+      }
+      this.connecting = false;
+    };
+
+    disconnectHandler = () => {
+      this.log('[DEBUG] Peripheral disconnected during operation');
+      this.currentPeripheral = null;
+      cleanup();
+      reject(new Error('Device disconnected during operation'));
+    };
+
+    peripheral.once('disconnect', disconnectHandler);
+
+    connectionTimeout = setTimeout(() => {
+      this.log('[DEBUG] Connection timeout');
+      cleanup();
+      this.forceDisconnect();
+      reject(new Error('Connection timeout'));
+    }, 15000); // Longer timeout
+
+    peripheral.connect((error) => {
+      if (error) {
+        this.log(`[DEBUG] Connection error: ${error}`);
+        cleanup();
+        this.currentPeripheral = null;
+        return reject(error);
       }
 
-      this.connecting = true;
-      this.currentPeripheral = peripheral;
-
-      let connectionTimeout = null;
-      let disconnectHandler = null;
-
-      const cleanup = () => {
-        if (connectionTimeout) {
-          clearTimeout(connectionTimeout);
-          connectionTimeout = null;
-        }
-        if (disconnectHandler) {
-          peripheral.removeListener('disconnect', disconnectHandler);
-          disconnectHandler = null;
-        }
-        this.connecting = false;
-      };
-
-      disconnectHandler = () => {
-        this.log('[DEBUG] Peripheral disconnected during operation');
-        this.currentPeripheral = null;
-        cleanup();
-        reject(new Error('Device disconnected during operation'));
-      };
-
-      peripheral.once('disconnect', disconnectHandler);
-
-      connectionTimeout = setTimeout(() => {
-        this.log('[DEBUG] Connection timeout');
-        cleanup();
-        this.forceDisconnect();
-        reject(new Error('Connection timeout'));
-      }, 10000); // Reduced timeout
-
-      peripheral.connect((error) => {
-        if (error) {
-          this.log(`[DEBUG] Connection error: ${error}`);
+      this.log('[DEBUG] Connected, waiting before service discovery...');
+      
+      // Wait longer before service discovery to let connection stabilize
+      setTimeout(() => {
+        if (peripheral.state !== 'connected') {
           cleanup();
-          this.currentPeripheral = null;
-          return reject(error);
+          return reject(new Error('Device disconnected before service discovery'));
         }
 
-        this.log('[DEBUG] Connected, discovering services...');
+        this.log('[DEBUG] Starting service discovery...');
         
         peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
           if (error) {
@@ -976,6 +1001,11 @@ class MoesFingerbotAccessory {
             cleanup();
             this.forceDisconnect();
             return reject(error);
+          }
+
+          if (peripheral.state !== 'connected') {
+            cleanup();
+            return reject(new Error('Device disconnected during service discovery'));
           }
 
           this.log(`[DEBUG] Discovered ${services?.length || 0} services, ${characteristics?.length || 0} characteristics`);
@@ -995,9 +1025,20 @@ class MoesFingerbotAccessory {
             this.log(`[DEBUG] Using notify characteristic: ${notifyChar.uuid}`);
           }
 
+          // Clear connection timeout, set service timeout
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+          
+          serviceTimeout = setTimeout(() => {
+            this.log('[DEBUG] Service operation timeout');
+            cleanup();
+            this.forceDisconnect();
+            reject(new Error('Service operation timeout'));
+          }, 10000);
+
           this.executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject);
         });
-      });
+      }, 2000); // Wait 2 seconds after connection before service discovery
     });
   }
 
