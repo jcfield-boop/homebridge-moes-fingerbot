@@ -50,25 +50,6 @@
         "title": "Enable Debug Logging",
         "default": false
       },
-      "commandCharacteristics": {
-        "type": "string",
-        "title": "Custom Command Characteristic UUIDs",
-        "description": "Comma-separated list of characteristic UUIDs to try for sending commands (e.g., ffe1,ffe2). Leave blank for default.",
-        "placeholder": "ffe1,ffe2"
-      },
-      "batteryCharacteristic": {
-        "type": "string",
-        "title": "Battery Level Characteristic UUID",
-        "description": "Characteristic UUID to use for battery level (e.g., ffe2). Leave blank to auto-detect.",
-        "placeholder": "ffe2"
-      },
-      "batteryCheckInterval": {
-        "type": "number",
-        "title": "Battery Poll Interval (minutes)",
-        "default": 60,
-        "minimum": 1,
-        "maximum": 1440
-      },
       "deviceId": {
         "title": "Device ID",
         "type": "string",

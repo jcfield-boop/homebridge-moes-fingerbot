@@ -367,14 +367,12 @@ class MoesFingerbotAccessory {
       this.log(`[DEBUG] Characteristic: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
     });
 
-    // Find write and notify characteristics
-    const writeChar = characteristics.find(char =>
-      char.properties.includes('write') || char.properties.includes('writeWithoutResponse')
-    );
+    // PATCH: Prefer 2b11 for write, 2b10 for notify
+    const writeChar = characteristics.find(char => char.uuid === '2b11' && (char.properties.includes('write') || char.properties.includes('writeWithoutResponse')))
+      || characteristics.find(char => char.properties.includes('write') || char.properties.includes('writeWithoutResponse'));
 
-    const notifyChar = characteristics.find(char =>
-      char.properties.includes('notify')
-    );
+    const notifyChar = characteristics.find(char => char.uuid === '2b10' && char.properties.includes('notify'))
+      || characteristics.find(char => char.properties.includes('notify'));
 
     if (!writeChar) {
       this.log('[DEBUG] No writable characteristic found');
