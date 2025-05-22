@@ -62,9 +62,18 @@ class MoesFingerbotAccessory {
     noble.on('stateChange', (state) => {
       if (state === 'poweredOn') {
         this.log('Bluetooth adapter is powered on');
+        // Delay battery diagnostic to avoid conflicts
         setTimeout(() => {
-          this.getBatteryStatus();
-        }, 3000);
+          if (this.batteryDiagnosticMode) {
+            this.log('[BATTERY-DIAG] Diagnostic mode enabled - will test battery reading methods');
+            // Run diagnostic after a longer delay to ensure stability
+            setTimeout(() => {
+              this.getBatteryStatus().catch(err => {
+                this.log(`[BATTERY-DIAG] Initial diagnostic failed: ${err.message}`);
+              });
+            }, 5000);
+          }
+        }, 1000);
       } else {
         this.log('Bluetooth adapter is powered off or unavailable');
         this.forceDisconnect();
@@ -119,13 +128,26 @@ class MoesFingerbotAccessory {
       this.lastBatteryCheck = now;
       this.log(`[DEBUG] (Battery) Triggering background battery check...`);
       
-      this.getBatteryStatus().catch(err => {
-        this.log(`[DEBUG] (Battery) Background check failed: ${err.message}`);
-      });
+      // Don't run battery diagnostic if main operation is in progress
+      if (!this.currentOperation) {
+        this.getBatteryStatus().catch(err => {
+          this.log(`[DEBUG] (Battery) Background check failed: ${err.message}`);
+        });
+      }
     } else {
       this.log(`[DEBUG] (Battery) Returning cached battery level: ${this.batteryLevel}`);
     }
     callback(null, this.batteryLevel >= 0 && this.batteryLevel <= 100 ? this.batteryLevel : 0);
+  }
+
+  // Manual battery test trigger (can be called independently)
+  async testBatteryReading() {
+    this.log('[BATTERY-TEST] Starting manual battery test...');
+    if (this.currentOperation || this.connecting) {
+      throw new Error('Device busy - try again later');
+    }
+    
+    return this.getBatteryStatus();
   }
 
   forceDisconnect() {
@@ -139,6 +161,14 @@ class MoesFingerbotAccessory {
       this.currentPeripheral = null;
     }
     this.connecting = false;
+    
+    // Also try to stop any ongoing scanning to prevent conflicts
+    try {
+      noble.stopScanning();
+    } catch (e) {
+      // Ignore scanning stop errors
+    }
+    noble.removeAllListeners('discover');
   }
 
   // Generate session key (for battery reading)
@@ -409,66 +439,83 @@ class MoesFingerbotAccessory {
           return reject(error);
         }
 
-        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-          if (error) {
-            cleanup();
-            try {
-              peripheral.disconnect();
-            } catch (e) {}
-            return reject(error);
-          }
+        // Add small delay after connection before service discovery
+        setTimeout(() => {
+          peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
+            if (error) {
+              cleanup();
+              try {
+                peripheral.disconnect();
+              } catch (e) {}
+              return reject(error);
+            }
 
-          const writeChar = characteristics.find(char => char.uuid === '2b11');
-          const notifyChar = characteristics.find(char => char.uuid === '2b10');
+            const writeChar = characteristics.find(char => char.uuid === '2b11');
+            const notifyChar = characteristics.find(char => char.uuid === '2b10');
 
-          if (!writeChar) {
-            cleanup();
-            try {
-              peripheral.disconnect();
-            } catch (e) {}
-            return reject(new Error('No write characteristic found'));
-          }
+            if (!writeChar) {
+              cleanup();
+              try {
+                peripheral.disconnect();
+              } catch (e) {}
+              return reject(new Error('No write characteristic found'));
+            }
 
-          // Set up notifications to capture response
-          if (notifyChar) {
-            notifyChar.subscribe((err) => {
-              if (!err) {
-                notifyChar.on('data', (data) => {
-                  const result = testConfig.parser(data);
-                  if (result) {
-                    batteryResult = result;
-                  }
-                });
-              }
-            });
-          }
+            // Set up notifications to capture response
+            let responseReceived = false;
+            
+            if (notifyChar) {
+              notifyChar.subscribe((err) => {
+                if (!err) {
+                  notifyChar.on('data', (data) => {
+                    responseReceived = true;
+                    this.log(`[BATTERY-DIAG] ${testConfig.name} - Response: ${data.toString('hex')}`);
+                    const result = testConfig.parser(data);
+                    if (result) {
+                      batteryResult = result;
+                    }
+                  });
+                }
+              });
+            }
 
-          this.generateSessionKey();
-          const packet = testConfig.packet();
-          
-          if (packet) {
-            writeChar.write(packet, true, (writeError) => {
-              if (writeError) {
-                this.log(`[BATTERY-DIAG] Write error for ${testConfig.name}: ${writeError}`);
-              }
-              
-              // Wait for response
+            this.generateSessionKey();
+            const packet = testConfig.packet();
+            
+            if (packet) {
+              // Add delay before writing
               setTimeout(() => {
-                cleanup();
-                try {
-                  peripheral.disconnect();
-                } catch (e) {}
-                resolve(batteryResult);
-              }, 2000);
-            });
-          } else {
-            cleanup();
-            try {
-              peripheral.disconnect();
-            } catch (e) {}
-            reject(new Error('Failed to create test packet'));
-          }
-        });
+                writeChar.write(packet, true, (writeError) => {
+                  if (writeError) {
+                    this.log(`[BATTERY-DIAG] Write error for ${testConfig.name}: ${writeError}`);
+                  } else {
+                    this.log(`[BATTERY-DIAG] ${testConfig.name} - Packet sent: ${packet.toString('hex')}`);
+                  }
+                  
+                  // Wait longer for response
+                  setTimeout(() => {
+                    cleanup();
+                    try {
+                      peripheral.disconnect();
+                    } catch (e) {}
+                    
+                    if (!responseReceived) {
+                      this.log(`[BATTERY-DIAG] ${testConfig.name} - No response received`);
+                    }
+                    
+                    resolve(batteryResult);
+                  }, 3000); // Longer wait for response
+                });
+              }, 500);
+            } else {
+              cleanup();
+              try {
+                peripheral.disconnect();
+              } catch (e) {}
+              reject(new Error('Failed to create test packet'));
+            }
+          });
+        }, 500); // Delay after connection
       });
 
       peripheral.once('disconnect', () => {
@@ -865,6 +912,20 @@ class MoesFingerbotAccessory {
         return reject(new Error('Already connecting'));
       }
 
+      // Check if already connected and disconnect first
+      if (peripheral.state === 'connected') {
+        this.log('[DEBUG] Peripheral already connected, disconnecting first...');
+        try {
+          peripheral.disconnect();
+          setTimeout(() => {
+            this.connectAndPress(peripheral).then(resolve).catch(reject);
+          }, 1000);
+          return;
+        } catch (e) {
+          this.log(`[DEBUG] Error disconnecting: ${e}`);
+        }
+      }
+
       this.connecting = true;
       this.currentPeripheral = peripheral;
 
@@ -897,7 +958,7 @@ class MoesFingerbotAccessory {
         cleanup();
         this.forceDisconnect();
         reject(new Error('Connection timeout'));
-      }, 12000);
+      }, 10000); // Reduced timeout
 
       peripheral.connect((error) => {
         if (error) {
