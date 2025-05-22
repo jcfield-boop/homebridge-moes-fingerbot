@@ -69,21 +69,15 @@
         "minimum": 1,
         "maximum": 1440
       },
-      "advanced": {
-        "type": "object",
-        "title": "Advanced Settings",
-        "properties": {
-          "deviceId": {
-            "title": "Device ID",
-            "type": "string",
-            "description": "The Tuya Device ID (Virtual ID) for your Fingerbot."
-          },
-          "localKey": {
-            "title": "Local Key",
-            "type": "string",
-            "description": "The 16-character Tuya Auth Key for encrypted BLE commands."
-          }
-        }
+      "deviceId": {
+        "title": "Device ID",
+        "type": "string",
+        "description": "The Tuya Device ID (Virtual ID) for your Fingerbot."
+      },
+      "localKey": {
+        "title": "Local Key",
+        "type": "string",
+        "description": "The 16-character Tuya Auth Key for encrypted BLE commands."
       }
     },
     "required": ["name", "address"]
