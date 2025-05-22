@@ -33,7 +33,8 @@ class MoesFingerbotAccessory {
     this.scanRetryCooldown = (config.advanced?.scanRetryCooldown) || 1000;
     this.batteryCheckInterval = ((config.advanced?.batteryCheckInterval) || 60) * 60 * 1000;
     
-    // DIAGNOSTIC MODE for battery discovery
+    // DIAGNOSTIC MODE for testing different commands
+    this.commandDiagnosticMode = config.commandDiagnosticMode !== false; // default true
     this.batteryDiagnosticMode = config.batteryDiagnosticMode !== false; // default true
 
     // Protocol state - using working format from diagnostic
@@ -622,7 +623,100 @@ class MoesFingerbotAccessory {
     });
   }
 
-  // BATTERY DIAGNOSTIC: Multiple approaches to discover battery reading
+  // COMMAND DIAGNOSTIC: Test different command approaches to find what makes the Fingerbot move
+  getCommandTestConfigurations() {
+    return [
+      {
+        name: "Current DP1 BOOL (true/false sequence)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // DP1 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]))  // DP1 = false
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "DP2 BOOL (alternative switch DP)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01])), // DP2 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]))  // DP2 = false
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "DP3 BOOL (another alternative)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x03, 0x01, 0x00, 0x01, 0x01])), // DP3 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x03, 0x01, 0x00, 0x01, 0x00]))  // DP3 = false
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "DP1 INTEGER (0 to 1)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01])), // DP1 = 1 (int)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]))  // DP1 = 0 (int)
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "DP1 single press (BOOL true only)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])) // DP1 = true only
+        ],
+        delay: 500
+      },
+      {
+        name: "DP4 BOOL (press/direction control)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x04, 0x01, 0x00, 0x01, 0x01])) // DP4 = true
+        ],
+        delay: 500
+      },
+      {
+        name: "DP5 BOOL (mode control)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x05, 0x01, 0x00, 0x01, 0x01])) // DP5 = true
+        ],
+        delay: 500
+      },
+      {
+        name: "Multiple DPs (press + direction)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // DP1 = true (press)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]))  // DP2 = true (direction?)
+        ],
+        delay: 800
+      },
+      {
+        name: "Direct command 0x04 (raw press)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x04, Buffer.from([0x01])) // Direct press command
+        ],
+        delay: 500
+      },
+      {
+        name: "Direct command 0x07 (alternative press)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x07, Buffer.from([0x01])) // Alternative press
+        ],
+        delay: 500
+      },
+      {
+        name: "Raw switch command 0x03",
+        commands: [
+          () => this.createTuyaBLEPacket(0x03, Buffer.from([0x01, 0x00])) // Raw switch
+        ],
+        delay: 500
+      },
+      {
+        name: "DP1 with different data format",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x04, 0x00, 0x01, 0x01])) // DP1, type 4
+        ],
+        delay: 500
+      }
+    ];
+  }
   getBatteryTestConfigurations() {
     return [
       {
@@ -834,6 +928,52 @@ class MoesFingerbotAccessory {
   }
 
   async pressButton() {
+    if (this.commandDiagnosticMode) {
+      return this.pressButtonDiagnostic();
+    } else {
+      return this.pressButtonStandard();
+    }
+  }
+
+  async pressButtonDiagnostic() {
+    return new Promise((resolve, reject) => {
+      this.log('[COMMAND-DIAG] Starting command diagnostic to find working Fingerbot commands...');
+      this.forceDisconnect();
+
+      const testConfigs = this.getCommandTestConfigurations();
+      let testIndex = 0;
+
+      const runNextCommandTest = () => {
+        if (testIndex >= testConfigs.length) {
+          this.log(`[COMMAND-DIAG] All command tests completed! Check if any made the Fingerbot move.`);
+          this.log(`[COMMAND-DIAG] If you saw movement, note which test number worked and we'll use that format.`);
+          resolve();
+          return;
+        }
+
+        const config = testConfigs[testIndex];
+        this.log(`[COMMAND-DIAG] Test ${testIndex + 1}/${testConfigs.length}: ${config.name}`);
+        this.log(`[COMMAND-DIAG] ** WATCH THE FINGERBOT NOW ** - Test starting in 2 seconds...`);
+        
+        setTimeout(() => {
+          testIndex++;
+          this.connectAndTestCommand(config)
+            .then(() => {
+              this.log(`[COMMAND-DIAG] Test "${config.name}" completed. Did the Fingerbot move? (Check physically)`);
+              setTimeout(runNextCommandTest, 3000); // 3 second delay between tests
+            })
+            .catch((error) => {
+              this.log(`[COMMAND-DIAG] Test "${config.name}" failed: ${error.message}`);
+              setTimeout(runNextCommandTest, 2000);
+            });
+        }, 2000); // 2 second warning delay
+      };
+
+      runNextCommandTest();
+    });
+  }
+
+  async pressButtonStandard() {
     return new Promise((resolve, reject) => {
       this.log('Scanning for Fingerbot...');
 
@@ -904,6 +1044,66 @@ class MoesFingerbotAccessory {
     });
   }
 
+  async connectAndTestCommand(testConfig) {
+    return new Promise((resolve, reject) => {
+      let scanTimeout = null;
+      let peripheralFound = false;
+
+      const discoverHandler = async (peripheral) => {
+        if (peripheral.address === this.address && !peripheralFound) {
+          peripheralFound = true;
+          
+          try {
+            noble.stopScanning();
+          } catch (e) {}
+          clearTimeout(scanTimeout);
+          noble.removeListener('discover', discoverHandler);
+
+          try {
+            await this.executeCommandTest(peripheral, testConfig);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        }
+      };
+
+      noble.on('discover', discoverHandler);
+      
+      try {
+        noble.startScanning([], true);
+      } catch (e) {
+        noble.removeListener('discover', discoverHandler);
+        reject(new Error('Failed to start scanning'));
+        return;
+      }
+
+      scanTimeout = setTimeout(() => {
+        try {
+          noble.stopScanning();
+        } catch (e) {}
+        noble.removeListener('discover', discoverHandler);
+        
+        if (!peripheralFound) {
+          reject(new Error('Device not found during command test'));
+        }
+      }, 4000); // Quick scan for command tests
+    });
+  }
+
+  async executeCommandTest(peripheral, testConfig) {
+    return new Promise((resolve, reject) => {
+      this.forceDisconnect();
+      
+      setTimeout(() => {
+        this.doConnection(peripheral, () => {
+          this.log(`[COMMAND-DIAG] Connection successful, executing: ${testConfig.name}`);
+          resolve();
+        }, reject, testConfig);
+      }, 500);
+    });
+  }
+
   async connectAndPress(peripheral) {
     return new Promise((resolve, reject) => {
       this.log('Connecting to Fingerbot...');
@@ -922,14 +1122,14 @@ class MoesFingerbotAccessory {
     });
   }
 
-  doConnection(peripheral, resolve, reject) {
+  doConnection(peripheral, resolve, reject, testConfig = null) {
     // Check if already connected and disconnect first
     if (peripheral.state === 'connected') {
       this.log('[DEBUG] Peripheral already connected, disconnecting first...');
       try {
         peripheral.disconnect();
         setTimeout(() => {
-          this.doConnection(peripheral, resolve, reject);
+          this.doConnection(peripheral, resolve, reject, testConfig);
         }, 2000);
         return;
       } catch (e) {
@@ -1036,10 +1236,92 @@ class MoesFingerbotAccessory {
             reject(new Error('Service operation timeout'));
           }, 10000);
 
-          this.executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject);
+          if (testConfig) {
+            this.executeTestSequence(writeChar, notifyChar, peripheral, testConfig, cleanup, resolve, reject);
+          } else {
+            this.executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject);
+          }
         });
       }, 2000); // Wait 2 seconds after connection before service discovery
     });
+  }
+
+  executeTestSequence(writeChar, notifyChar, peripheral, testConfig, cleanup, resolve, reject) {
+    this.log(`[COMMAND-DIAG] Executing test: ${testConfig.name}`);
+    
+    let operationTimeout = null;
+    let sequenceComplete = false;
+
+    operationTimeout = setTimeout(() => {
+      if (!sequenceComplete) {
+        this.log('[COMMAND-DIAG] Test operation timeout');
+        cleanup();
+        this.forceDisconnect();
+        resolve(); // Don't reject, just complete the test
+      }
+    }, 8000);
+
+    // Set up notifications to see if device responds
+    if (notifyChar) {
+      notifyChar.subscribe((error) => {
+        if (error) {
+          this.log(`[COMMAND-DIAG] Notification subscription error: ${error}`);
+        } else {
+          this.log('[COMMAND-DIAG] Subscribed to notifications');
+          
+          notifyChar.on('data', (data) => {
+            this.log(`[COMMAND-DIAG] Device response: ${data.toString('hex')}`);
+          });
+        }
+      });
+    }
+
+    // Execute the test command sequence
+    const executeTest = () => {
+      let commandIndex = 0;
+      
+      const sendNextCommand = () => {
+        if (commandIndex >= testConfig.commands.length) {
+          // Test completed
+          sequenceComplete = true;
+          clearTimeout(operationTimeout);
+          cleanup();
+          
+          setTimeout(() => {
+            this.forceDisconnect();
+            this.log(`[COMMAND-DIAG] Test "${testConfig.name}" completed - check if Fingerbot moved!`);
+            resolve();
+          }, 500);
+          return;
+        }
+
+        const commandFunction = testConfig.commands[commandIndex];
+        const packet = commandFunction();
+        commandIndex++;
+
+        if (packet) {
+          this.log(`[COMMAND-DIAG] Sending command ${commandIndex}: ${packet.toString('hex')}`);
+          writeChar.write(packet, true, (error) => {
+            if (error) {
+              this.log(`[COMMAND-DIAG] Command write error: ${error}`);
+            } else {
+              this.log(`[COMMAND-DIAG] Command ${commandIndex} sent successfully`);
+            }
+
+            // Wait before next command (or completion)
+            const delay = commandIndex >= testConfig.commands.length ? testConfig.delay : 300;
+            setTimeout(sendNextCommand, delay);
+          });
+        } else {
+          setTimeout(sendNextCommand, 100);
+        }
+      };
+
+      sendNextCommand();
+    };
+
+    // Start the test sequence
+    setTimeout(executeTest, 500);
   }
 
   executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
