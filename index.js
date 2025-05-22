@@ -50,9 +50,12 @@ class MoesFingerbotAccessory {
     noble.on('stateChange', (state) => {
       if (state === 'poweredOn') {
         this.log('Bluetooth adapter is powered on');
+        // PATCH: Proactive scan and service discovery on startup
+        setTimeout(() => {
+          this.validateDeviceOnStartup();
+        }, 2000); // Wait a bit for Homebridge to finish initializing
       } else {
         this.log('Bluetooth adapter is powered off or unavailable');
-        // Clean up any existing connections
         this.forceDisconnect();
       }
     });
@@ -498,5 +501,62 @@ class MoesFingerbotAccessory {
     } catch (error) {
       this.log(`[DEBUG] Error processing notification: ${error}`);
     }
+  }
+
+  async validateDeviceOnStartup() {
+    this.log('[DEBUG] Starting initial scan to validate Fingerbot services...');
+    let found = false;
+    let scanTimeout = null;
+
+    const discoverHandler = async (peripheral) => {
+      if (peripheral.address === this.address && !found) {
+        found = true;
+        this.log(`[DEBUG] [Startup] Found Fingerbot: ${peripheral.address}`);
+        try {
+          noble.stopScanning();
+        } catch (e) {}
+        clearTimeout(scanTimeout);
+
+        peripheral.connect((error) => {
+          if (error) {
+            this.log(`[DEBUG] [Startup] Connection error: ${error}`);
+            return;
+          }
+          this.log('[DEBUG] [Startup] Connected, discovering services...');
+          peripheral.discoverAllServicesAndCharacteristics((err, services, characteristics) => {
+            if (err) {
+              this.log(`[DEBUG] [Startup] Service discovery error: ${err}`);
+            } else {
+              this.log(`[DEBUG] [Startup] Discovered ${services.length} services, ${characteristics.length} characteristics`);
+              services.forEach(s => this.log(`[DEBUG] [Startup] Service: ${s.uuid}`));
+              characteristics.forEach(c => this.log(`[DEBUG] [Startup] Characteristic: ${c.uuid}, properties: ${JSON.stringify(c.properties)}`));
+            }
+            peripheral.disconnect();
+          });
+        });
+
+        peripheral.once('disconnect', () => {
+          this.log('[DEBUG] [Startup] Peripheral disconnected');
+        });
+      }
+    };
+
+    noble.on('discover', discoverHandler);
+
+    try {
+      noble.startScanning([], true);
+    } catch (e) {
+      this.log(`[DEBUG] [Startup] Error starting scan: ${e}`);
+      noble.removeListener('discover', discoverHandler);
+      return;
+    }
+
+    scanTimeout = setTimeout(() => {
+      noble.stopScanning();
+      noble.removeListener('discover', discoverHandler);
+      if (!found) {
+        this.log('[DEBUG] [Startup] Could not find Fingerbot during initial scan');
+      }
+    }, 8000);
   }
 }
