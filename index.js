@@ -190,107 +190,117 @@ class MoesFingerbotAccessory {
           this.connecting = false;
           return reject(error);
         }
-        this.log('[DEBUG] Connected, discovering all services...');
-        peripheral.discoverSomeServicesAndCharacteristics(
-          ['1910'],
-          ['2b11', '2b10'],
-          (error, services, characteristics) => {
-            if (error) {
-              this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
-              this.connecting = false;
-              peripheral.disconnect();
-              return reject(error);
-            }
-            this.log(`[DEBUG] Discovered services: ${services.length}`);
-            this.log(`[DEBUG] Discovered characteristics:`);
-            characteristics.forEach(char => {
-              this.log(`[DEBUG] Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
-            });
-
-            const writeChar = characteristics.find(char =>
-              char.uuid === '2b11' && (char.properties.includes('write') || char.properties.includes('writeWithoutResponse'))
-            );
-
-            if (!writeChar) {
-              this.log('[DEBUG] No writable characteristic (2b11) found');
-              this.connecting = false;
-              peripheral.disconnect();
-              return reject(new Error('No writable characteristic (2b11) found'));
-            }
-
-            const notifyChar = characteristics.find(char => char.uuid === '2b10' && char.properties.includes('notify'));
-            if (notifyChar) {
-              notifyChar.on('data', (data, isNotification) => {
-                this.log(`[DEBUG] Notification from 2b10: ${data.toString('hex')}`);
-                if (data.length > 2 && data[0] === 0x55 && data[1] === 0xaa && data[3] === 0x07) {
-                  const battery = data[data.length - 2];
-                  this.log(`[DEBUG] Parsed battery level: ${battery}%`);
-                  this.batteryLevel = battery;
-                  this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, battery);
-                }
+        this.log('[DEBUG] Connected, waiting before discovering services...');
+        // PATCH: Add a short delay before discovering services
+        setTimeout(() => {
+          // PATCH: Use correct service UUID from advertisement ("a201")
+          peripheral.discoverSomeServicesAndCharacteristics(
+            ['a201'],
+            ['2b11', '2b10'],
+            (error, services, characteristics) => {
+              if (error) {
+                this.log(`[DEBUG] Error discovering services/characteristics: ${error}`);
+                this.connecting = false;
+                peripheral.disconnect();
+                return reject(error);
+              }
+              if (!services || services.length === 0) {
+                this.log('[DEBUG] No services discovered!');
+                this.connecting = false;
+                peripheral.disconnect();
+                return reject(new Error('No services discovered'));
+              }
+              this.log(`[DEBUG] Discovered services: ${services.length}`);
+              this.log(`[DEBUG] Discovered characteristics:`);
+              characteristics.forEach(char => {
+                this.log(`[DEBUG] Characteristic UUID: ${char.uuid}, properties: ${JSON.stringify(char.properties)}`);
               });
-              notifyChar.subscribe((err) => {
-                if (err) {
-                  this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
-                } else {
-                  this.log('[DEBUG] Subscribed to 2b10 notifications');
-                  setTimeout(() => {
-                    // PATCH: Encrypt commands before sending
-                    const statusCmd = this.encryptTuyaCommand(Buffer.from('55aa00070008010100000010', 'hex'));
-                    this.log('[DEBUG] Sending status query command...');
-                    writeChar.write(statusCmd, false, (error) => {
-                      if (error) this.log(`[DEBUG] Status query write error: ${error}`);
-                      else this.log('[DEBUG] Status query command sent');
-                    });
-                    const pressCmd = this.encryptTuyaCommand(Buffer.from('55aa00060005010100010e', 'hex'));
-                    this.log('[DEBUG] Sending press command...');
-                    writeChar.write(pressCmd, false, (error) => {
-                      if (error) {
-                        this.log(`[DEBUG] Write error: ${error}`);
-                        this.connecting = false;
-                        peripheral.disconnect();
-                        return reject(error);
-                      }
-                      this.log('[DEBUG] Press command sent, waiting...');
-                      setTimeout(() => {
-                        const releaseCmd = this.encryptTuyaCommand(Buffer.from('55aa00060005010100000d', 'hex'));
-                        this.log('[DEBUG] Sending release command...');
-                        writeChar.write(releaseCmd, false, (error) => {
-                          this.connecting = false;
-                          peripheral.disconnect();
-                          if (error) {
-                            this.log(`[DEBUG] Release write error: ${error}`);
-                            return reject(error);
-                          }
-                          this.log('[DEBUG] Release command sent, done.');
-                          resolve();
-                        });
-                      }, this.pressTime);
-                    });
-                  }, 200);
-                }
-              });
-            }
 
-            const readChars = characteristics.filter(char => char.properties.includes('read'));
-            for (const char of readChars) {
-              char.read((err, data) => {
-                if (!err) {
-                  this.log(`[DEBUG] Read from ${char.uuid}: ${data.toString('hex')}`);
-                  // PATCH: Try to parse battery level from common battery characteristic (2a19)
-                  if (char.uuid === '2a19' && data.length === 1) {
-                    const battery = data.readUInt8(0);
-                    this.log(`[DEBUG] Parsed battery level from 2a19: ${battery}%`);
+              const writeChar = characteristics.find(char =>
+                char.uuid === '2b11' && (char.properties.includes('write') || char.properties.includes('writeWithoutResponse'))
+              );
+
+              if (!writeChar) {
+                this.log('[DEBUG] No writable characteristic (2b11) found');
+                this.connecting = false;
+                peripheral.disconnect();
+                return reject(new Error('No writable characteristic (2b11) found'));
+              }
+
+              const notifyChar = characteristics.find(char => char.uuid === '2b10' && char.properties.includes('notify'));
+              if (notifyChar) {
+                notifyChar.on('data', (data, isNotification) => {
+                  this.log(`[DEBUG] Notification from 2b10: ${data.toString('hex')}`);
+                  if (data.length > 2 && data[0] === 0x55 && data[1] === 0xaa && data[3] === 0x07) {
+                    const battery = data[data.length - 2];
+                    this.log(`[DEBUG] Parsed battery level: ${battery}%`);
                     this.batteryLevel = battery;
                     this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, battery);
                   }
-                  // PATCH: Try to parse battery from other characteristics if needed
-                  // Add more parsing logic here if you discover other battery formats
-                }
-              });
+                });
+                notifyChar.subscribe((err) => {
+                  if (err) {
+                    this.log('[DEBUG] Failed to subscribe to 2b10 notifications');
+                  } else {
+                    this.log('[DEBUG] Subscribed to 2b10 notifications');
+                    setTimeout(() => {
+                      // PATCH: Encrypt commands before sending
+                      const statusCmd = this.encryptTuyaCommand(Buffer.from('55aa00070008010100000010', 'hex'));
+                      this.log('[DEBUG] Sending status query command...');
+                      writeChar.write(statusCmd, false, (error) => {
+                        if (error) this.log(`[DEBUG] Status query write error: ${error}`);
+                        else this.log('[DEBUG] Status query command sent');
+                      });
+                      const pressCmd = this.encryptTuyaCommand(Buffer.from('55aa00060005010100010e', 'hex'));
+                      this.log('[DEBUG] Sending press command...');
+                      writeChar.write(pressCmd, false, (error) => {
+                        if (error) {
+                          this.log(`[DEBUG] Write error: ${error}`);
+                          this.connecting = false;
+                          peripheral.disconnect();
+                          return reject(error);
+                        }
+                        this.log('[DEBUG] Press command sent, waiting...');
+                        setTimeout(() => {
+                          const releaseCmd = this.encryptTuyaCommand(Buffer.from('55aa00060005010100000d', 'hex'));
+                          this.log('[DEBUG] Sending release command...');
+                          writeChar.write(releaseCmd, false, (error) => {
+                            this.connecting = false;
+                            peripheral.disconnect();
+                            if (error) {
+                              this.log(`[DEBUG] Release write error: ${error}`);
+                              return reject(error);
+                            }
+                            this.log('[DEBUG] Release command sent, done.');
+                            resolve();
+                          });
+                        }, this.pressTime);
+                      });
+                    }, 200);
+                  }
+                });
+              }
+
+              const readChars = characteristics.filter(char => char.properties.includes('read'));
+              for (const char of readChars) {
+                char.read((err, data) => {
+                  if (!err) {
+                    this.log(`[DEBUG] Read from ${char.uuid}: ${data.toString('hex')}`);
+                    // PATCH: Try to parse battery level from common battery characteristic (2a19)
+                    if (char.uuid === '2a19' && data.length === 1) {
+                      const battery = data.readUInt8(0);
+                      this.log(`[DEBUG] Parsed battery level from 2a19: ${battery}%`);
+                      this.batteryLevel = battery;
+                      this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, battery);
+                    }
+                    // PATCH: Try to parse battery from other characteristics if needed
+                    // Add more parsing logic here if you discover other battery formats
+                  }
+                });
+              }
             }
-          }
-        );
+          );
+        }, 300); // 300ms delay before service discovery
       });
 
       peripheral.on('disconnect', () => {
