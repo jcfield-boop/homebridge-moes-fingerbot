@@ -28,13 +28,13 @@ class MoesFingerbotAccessory {
 
     // Optional configuration
     this.pressTime = config.pressTime || 1000;
-    this.scanDuration = config.scanDuration || 8000; // Increased scan time
+    this.scanDuration = config.scanDuration || 8000;
     this.scanRetries = config.scanRetries || 3;
-    this.scanRetryCooldown = config.scanRetryCooldown || 2000; // Increased cooldown
+    this.scanRetryCooldown = config.scanRetryCooldown || 2000;
     this.batteryCheckInterval = (config.batteryCheckInterval || 60) * 60 * 1000;
 
     // Tuya BLE protocol state
-    this.sequenceNumber = Math.floor(Math.random() * 0xFFFF);
+    this.sequenceNumber = 1;
     this.sessionKey = null;
     this.isAuthenticated = false;
 
@@ -115,7 +115,7 @@ class MoesFingerbotAccessory {
     const now = Date.now();
     if (now - this.lastBatteryCheck > this.batteryCheckInterval) {
       this.lastBatteryCheck = now;
-      this.log(`[DEBUG] (Battery) Requesting fresh battery level...`);
+      this.log(`[DEBUG] (Battery) Triggering background battery check...`);
       
       // Trigger battery check in background
       this.getBatteryStatus().catch(err => {
@@ -142,7 +142,7 @@ class MoesFingerbotAccessory {
     this.sessionKey = null;
   }
 
-  // Generate proper session key from localKey
+  // Generate proper session key from localKey (must be exactly 16 bytes)
   generateSessionKey() {
     if (!this.localKey) {
       this.log('[DEBUG] Missing localKey for session key generation');
@@ -176,53 +176,30 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Create Tuya BLE packet with proper authentication
-  createTuyaBLEPacket(commandType, data = Buffer.alloc(0), encrypt = true) {
+  // Create Tuya BLE packet - simplified format without encryption for initial connection
+  createTuyaBLEPacket(commandType, data = Buffer.alloc(0)) {
     try {
-      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFFFFFF;
+      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
       
-      // Tuya BLE packet structure:
-      // [0x55, 0xaa] [seq(4)] [cmd(1)] [len(2)] [data] [checksum(1)]
+      // Tuya BLE packet structure for Fingerbot Plus:
+      // [0x55, 0xaa] [seq(2, BE)] [cmd(1)] [len(2, BE)] [data] [checksum(1)]
       const header = Buffer.from([0x55, 0xaa]);
       
-      // Sequence number (4 bytes, big endian)
-      const seqBuffer = Buffer.alloc(4);
-      seqBuffer.writeUInt32BE(this.sequenceNumber, 0);
+      // Sequence number (2 bytes, big endian)
+      const seqBuffer = Buffer.alloc(2);
+      seqBuffer.writeUInt16BE(this.sequenceNumber, 0);
       
       // Command type (1 byte)
       const cmdBuffer = Buffer.from([commandType]);
       
-      // Prepare data payload
-      let finalData = data;
-      
-      // Encrypt data if we have session key and encryption is requested
-      if (encrypt && this.sessionKey && data.length > 0) {
-        try {
-          // Add device ID to data for authentication
-          const authData = Buffer.concat([
-            Buffer.from(this.deviceId, 'utf8'),
-            data
-          ]);
-          
-          // Encrypt with AES-128-ECB
-          const cipher = crypto.createCipher('aes-128-ecb', this.sessionKey);
-          const encrypted = Buffer.concat([cipher.update(authData), cipher.final()]);
-          finalData = encrypted;
-          this.log(`[DEBUG] Encrypted payload: ${finalData.toString('hex')}`);
-        } catch (encError) {
-          this.log(`[DEBUG] Encryption failed, using raw data: ${encError}`);
-          finalData = data;
-        }
-      }
-      
       // Data length (2 bytes, big endian)
       const lengthBuffer = Buffer.alloc(2);
-      lengthBuffer.writeUInt16BE(finalData.length, 0);
+      lengthBuffer.writeUInt16BE(data.length, 0);
       
       // Build payload
-      const payload = Buffer.concat([seqBuffer, cmdBuffer, lengthBuffer, finalData]);
+      const payload = Buffer.concat([seqBuffer, cmdBuffer, lengthBuffer, data]);
       
-      // Calculate checksum
+      // Calculate checksum (sum of all bytes)
       const preChecksum = Buffer.concat([header, payload]);
       let checksum = 0;
       for (let i = 0; i < preChecksum.length; i++) {
@@ -241,53 +218,32 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Authentication packets
+  // Authentication packets for Fingerbot Plus
   createLoginPacket() {
+    // Login with plain device ID (no encryption initially)
     const loginData = Buffer.from(this.deviceId, 'utf8');
-    return this.createTuyaBLEPacket(0x01, loginData, false);
+    return this.createTuyaBLEPacket(0x01, loginData);
   }
 
-  createHeartbeatPacket() {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const timestampBuffer = Buffer.alloc(4);
-    timestampBuffer.writeUInt32BE(timestamp, 0);
-    return this.createTuyaBLEPacket(0x02, timestampBuffer, true);
-  }
-
-  // Device command packets
-  createStatusQueryPacket() {
-    return this.createTuyaBLEPacket(0x08, Buffer.alloc(0), true);
-  }
-
-  createDPCommandPacket(dpId, dpType, value) {
-    let valueBuffer;
-    
-    switch (dpType) {
-      case 0x01: // BOOL
-        valueBuffer = Buffer.from([value ? 0x01 : 0x00]);
-        break;
-      case 0x02: // INT (4 bytes)
-        valueBuffer = Buffer.alloc(4);
-        valueBuffer.writeUInt32BE(value, 0);
-        break;
-      case 0x03: // STRING
-        valueBuffer = Buffer.from(value.toString(), 'utf8');
-        break;
-      default:
-        valueBuffer = Buffer.from([value]);
-    }
-    
-    const dpData = Buffer.concat([
-      Buffer.from([dpId]),                           // DP ID
-      Buffer.from([dpType]),                         // DP Type
-      Buffer.alloc(2).fill(0).writeUInt16BE(valueBuffer.length, 0), // Length (2 bytes)
-      valueBuffer                                    // Value
+  // Device command packets for switch control
+  createSwitchCommandPacket(state) {
+    // For Fingerbot Plus, DP 1 is the main switch
+    // Format: [dp_id(1)] [dp_type(1)] [dp_len(2)] [dp_value]
+    const dpData = Buffer.from([
+      0x01,        // DP ID 1 (main switch)
+      0x01,        // DP type (BOOL)
+      0x00, 0x01,  // Data length (1 byte)
+      state ? 0x01 : 0x00  // Value
     ]);
-    
-    return this.createTuyaBLEPacket(0x06, dpData, true);
+    return this.createTuyaBLEPacket(0x06, dpData);
   }
 
-  // Battery status reading
+  createStatusQueryPacket() {
+    // Status query with no data
+    return this.createTuyaBLEPacket(0x08, Buffer.alloc(0));
+  }
+
+  // Battery status reading (simplified approach)
   async getBatteryStatus() {
     return new Promise((resolve, reject) => {
       this.log('[DEBUG] (Battery) Starting battery status check...');
@@ -354,7 +310,7 @@ class MoesFingerbotAccessory {
           peripheral.disconnect();
         } catch (e) {}
         reject(new Error('Connection timeout'));
-      }, 10000);
+      }, 8000);
 
       peripheral.connect((error) => {
         if (error) {
@@ -437,22 +393,20 @@ class MoesFingerbotAccessory {
 
   parseBatteryFromResponse(data) {
     try {
-      // Parse Tuya BLE response for battery level
+      // Simple battery parsing from Tuya BLE response
       if (data.length >= 10) {
-        // Look for DP response format
+        // Look for battery DP (usually DP 2 or 3)
         for (let i = 0; i < data.length - 6; i++) {
-          if (data[i] === 0x02) { // DP ID 2 (battery)
-            const dpType = data[i + 1];
-            if (dpType === 0x02) { // INTEGER type
-              const dpLen = data.readUInt16BE(i + 2);
-              if (dpLen === 4 && i + 8 <= data.length) {
-                const batteryValue = data.readUInt32BE(i + 4);
-                if (batteryValue <= 100) {
-                  this.batteryLevel = batteryValue;
-                  this.log(`[DEBUG] (Battery) Extracted battery level: ${batteryValue}%`);
-                  this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, batteryValue);
-                  break;
-                }
+          // Check for DP with type 0x02 (INTEGER) that could be battery
+          if (data[i] >= 0x02 && data[i] <= 0x04 && data[i + 1] === 0x02) {
+            const dpLen = data.readUInt16BE(i + 2);
+            if (dpLen === 4 && i + 8 <= data.length) {
+              const value = data.readUInt32BE(i + 4);
+              if (value >= 0 && value <= 100) {
+                this.batteryLevel = value;
+                this.log(`[DEBUG] (Battery) Found battery level: ${value}%`);
+                this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, value);
+                break;
               }
             }
           }
@@ -620,22 +574,74 @@ class MoesFingerbotAccessory {
   }
 
   executeFingerbot(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
-    this.log('[DEBUG] Starting Tuya BLE authentication and command sequence...');
+    this.log('[DEBUG] Starting simplified Fingerbot control sequence...');
     
     this.generateSessionKey();
     
-    let authStep = 0;
     let operationTimeout = null;
-    let authCompleted = false;
+    let stepComplete = false;
 
     operationTimeout = setTimeout(() => {
       this.log('[DEBUG] Overall operation timeout');
       cleanup();
       this.forceDisconnect();
       reject(new Error('Operation timeout'));
-    }, 12000);
+    }, 10000);
 
-    // Set up notifications
+    // Simple direct control approach - no complex authentication
+    const sendCommands = () => {
+      let step = 0;
+      
+      const executeStep = () => {
+        if (stepComplete || peripheral.state !== 'connected') {
+          return;
+        }
+
+        step++;
+        let packet = null;
+        let delay = 300;
+
+        switch (step) {
+          case 1:
+            this.log('[DEBUG] Step 1: Sending press command (ON)...');
+            packet = this.createSwitchCommandPacket(true);
+            delay = this.pressTime; // Hold for press duration
+            break;
+            
+          case 2:
+            this.log('[DEBUG] Step 2: Sending release command (OFF)...');
+            packet = this.createSwitchCommandPacket(false);
+            delay = 300;
+            break;
+            
+          default:
+            this.log('[DEBUG] Command sequence completed');
+            stepComplete = true;
+            clearTimeout(operationTimeout);
+            cleanup();
+            setTimeout(() => this.forceDisconnect(), 100);
+            resolve();
+            return;
+        }
+
+        if (packet) {
+          writeChar.write(packet, true, (error) => {
+            if (error) {
+              this.log(`[DEBUG] Error in step ${step}: ${error}`);
+              // Continue anyway for Fingerbot
+              setTimeout(executeStep, delay);
+            } else {
+              this.log(`[DEBUG] Step ${step} sent successfully`);
+              setTimeout(executeStep, delay);
+            }
+          });
+        }
+      };
+
+      executeStep();
+    };
+
+    // Set up notifications if available (for status/battery info)
     if (notifyChar) {
       notifyChar.subscribe((error) => {
         if (error) {
@@ -645,110 +651,16 @@ class MoesFingerbotAccessory {
           
           notifyChar.on('data', (data) => {
             this.log(`[DEBUG] Notification: ${data.toString('hex')}`);
-            this.handleAuthResponse(data);
-            
-            // Continue auth sequence
-            if (!authCompleted) {
-              setTimeout(nextAuthStep, 500);
-            }
+            this.parseBatteryFromResponse(data);
           });
         }
-      });
-    }
-
-    const nextAuthStep = () => {
-      if (authCompleted || peripheral.state !== 'connected') {
-        return;
-      }
-
-      authStep++;
-      let packet = null;
-      
-      switch (authStep) {
-        case 1:
-          this.log('[DEBUG] Auth Step 1: Sending login packet...');
-          packet = this.createLoginPacket();
-          break;
-          
-        case 2:
-          this.log('[DEBUG] Auth Step 2: Sending heartbeat...');
-          packet = this.createHeartbeatPacket();
-          break;
-          
-        case 3:
-          this.log('[DEBUG] Auth Step 3: Sending status query...');
-          packet = this.createStatusQueryPacket();
-          break;
-          
-        case 4:
-          this.log('[DEBUG] Auth Step 4: Sending press command...');
-          packet = this.createDPCommandPacket(0x01, 0x01, true); // DP1, BOOL, true
-          setTimeout(() => {
-            if (!authCompleted) {
-              nextAuthStep(); // Move to release after press time
-            }
-          }, this.pressTime);
-          break;
-          
-        case 5:
-          this.log('[DEBUG] Auth Step 5: Sending release command...');
-          packet = this.createDPCommandPacket(0x01, 0x01, false); // DP1, BOOL, false
-          authCompleted = true;
-          setTimeout(() => {
-            this.log('[DEBUG] Command sequence completed');
-            clearTimeout(operationTimeout);
-            cleanup();
-            this.forceDisconnect();
-            resolve();
-          }, 500);
-          break;
-          
-        default:
-          authCompleted = true;
-          clearTimeout(operationTimeout);
-          cleanup();
-          this.forceDisconnect();
-          resolve();
-          return;
-      }
-
-      if (packet) {
-        writeChar.write(packet, true, (error) => {
-          if (error) {
-            this.log(`[DEBUG] Error in auth step ${authStep}: ${error}`);
-            if (!authCompleted) {
-              setTimeout(nextAuthStep, 1000); // Continue anyway
-            }
-          } else {
-            this.log(`[DEBUG] Auth step ${authStep} sent successfully`);
-            if (!notifyChar && !authCompleted) {
-              setTimeout(nextAuthStep, 800); // No notifications, proceed automatically
-            }
-          }
-        });
-      }
-    };
-
-    // Start auth sequence
-    setTimeout(nextAuthStep, 200);
-  }
-
-  handleAuthResponse(data) {
-    try {
-      if (data.length >= 7) {
-        const cmdType = data[6]; // Command type
-        this.log(`[DEBUG] Auth response command type: 0x${cmdType.toString(16)}`);
         
-        if (cmdType === 0x01) {
-          this.log('[DEBUG] Login response - authentication progressing');
-          this.isAuthenticated = true;
-        } else if (cmdType === 0x08) {
-          this.log('[DEBUG] Status response received');
-          this.parseBatteryFromResponse(data);
-        }
-      }
-    } catch (error) {
-      this.log(`[DEBUG] Error parsing auth response: ${error}`);
+        // Start commands regardless of notification setup
+        setTimeout(sendCommands, 200);
+      });
+    } else {
+      // No notifications, start commands directly
+      setTimeout(sendCommands, 200);
     }
   }
 }
