@@ -118,6 +118,7 @@ class MoesFingerbotAccessory {
       let scanningInProgress = false;
       let scanTimeout = null;
 
+      // Move discoverHandler out so we can reference it for removal
       const discoverHandler = async (peripheral) => {
         if (peripheral.address === this.address) {
           this.log(`Found Fingerbot: ${peripheral.address}`);
@@ -130,7 +131,7 @@ class MoesFingerbotAccessory {
           }, null, 2)}`);
           clearTimeout(scanTimeout);
           noble.stopScanning();
-          noble.removeListener('discover', discoverHandler);
+          noble.removeListener('discover', discoverHandler); // Always remove listener
           scanningInProgress = false;
 
           try {
@@ -150,7 +151,7 @@ class MoesFingerbotAccessory {
 
         scanTimeout = setTimeout(() => {
           noble.stopScanning();
-          noble.removeListener('discover', discoverHandler);
+          noble.removeListener('discover', discoverHandler); // Always remove listener
           scanningInProgress = false;
 
           if (retryCount < this.scanRetries) {
@@ -162,6 +163,9 @@ class MoesFingerbotAccessory {
           }
         }, this.scanDuration);
       };
+
+      // PATCH: Remove any existing discover listeners for this handler before starting a new scan
+      noble.removeListener('discover', discoverHandler);
 
       startScan();
     });
@@ -271,7 +275,18 @@ class MoesFingerbotAccessory {
             const readChars = characteristics.filter(char => char.properties.includes('read'));
             for (const char of readChars) {
               char.read((err, data) => {
-                if (!err) this.log(`[DEBUG] Read from ${char.uuid}: ${data.toString('hex')}`);
+                if (!err) {
+                  this.log(`[DEBUG] Read from ${char.uuid}: ${data.toString('hex')}`);
+                  // PATCH: Try to parse battery level from common battery characteristic (2a19)
+                  if (char.uuid === '2a19' && data.length === 1) {
+                    const battery = data.readUInt8(0);
+                    this.log(`[DEBUG] Parsed battery level from 2a19: ${battery}%`);
+                    this.batteryLevel = battery;
+                    this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, battery);
+                  }
+                  // PATCH: Try to parse battery from other characteristics if needed
+                  // Add more parsing logic here if you discover other battery formats
+                }
               });
             }
           }
