@@ -27,17 +27,16 @@ class MoesFingerbotAccessory {
     }
 
     // Optional configuration
-    this.pressTime = config.pressTime || 3000;
+    this.pressTime = config.pressTime || 1000; // Reduced from 3000ms
     this.scanDuration = config.scanDuration || 5000;
     this.scanRetries = config.scanRetries || 3;
     this.scanRetryCooldown = config.scanRetryCooldown || 1000;
     this.batteryCheckInterval = (config.batteryCheckInterval || 60) * 60 * 1000;
 
     // Tuya BLE protocol state
-    this.sequenceNumber = 0;
+    this.sequenceNumber = Math.floor(Math.random() * 0xFFFF); // Start with random seq
     this.sessionKey = null;
     this.isAuthenticated = false;
-    this.tuyaTimestamp = 0;
 
     // Device state
     this.isOn = false;
@@ -146,11 +145,13 @@ class MoesFingerbotAccessory {
     }
 
     try {
-      // Convert localKey to buffer if it's hex
+      // Convert localKey to buffer - ensure it's exactly 16 bytes
       let keyBuffer;
       if (this.localKey.length === 32) {
+        // Hex string
         keyBuffer = Buffer.from(this.localKey, 'hex');
       } else {
+        // UTF8 string - pad or truncate to 16 bytes
         keyBuffer = Buffer.from(this.localKey, 'utf8');
         if (keyBuffer.length > 16) {
           keyBuffer = keyBuffer.slice(0, 16);
@@ -170,54 +171,40 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Tuya BLE packet structure
+  // Improved packet creation with proper Tuya BLE format
   createTuyaBLEPacket(commandType, data = Buffer.alloc(0)) {
     try {
-      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFFFFFF;
+      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
       
-      // Tuya BLE header: [0x55, 0xaa]
+      // Tuya BLE packet format:
+      // [header(2)] [seq(2)] [cmd(1)] [len(2)] [data(n)] [checksum(1)]
       const header = Buffer.from([0x55, 0xaa]);
       
-      // Sequence number (4 bytes, big endian)
-      const seqBuffer = Buffer.alloc(4);
-      seqBuffer.writeUInt32BE(this.sequenceNumber, 0);
+      // Sequence number (2 bytes, little endian for BLE)
+      const seqBuffer = Buffer.alloc(2);
+      seqBuffer.writeUInt16LE(this.sequenceNumber, 0);
       
       // Command type (1 byte)
       const cmdBuffer = Buffer.from([commandType]);
       
-      // Data length (2 bytes, big endian)
+      // Data length (2 bytes, little endian)
       const lengthBuffer = Buffer.alloc(2);
-      lengthBuffer.writeUInt16BE(data.length, 0);
+      lengthBuffer.writeUInt16LE(data.length, 0);
       
-      // Build payload (everything except header and checksum)
+      // Build payload before encryption
       const payload = Buffer.concat([seqBuffer, cmdBuffer, lengthBuffer, data]);
       
-      // If we have a session key, encrypt the payload
-      let finalPayload = payload;
-      if (this.sessionKey) {
-        try {
-          const cipher = crypto.createCipheriv('aes-128-ecb', this.sessionKey, null);
-          cipher.setAutoPadding(true);
-          finalPayload = Buffer.concat([cipher.update(payload), cipher.final()]);
-          this.log(`[DEBUG] Encrypted payload: ${finalPayload.toString('hex')}`);
-        } catch (encError) {
-          this.log(`[DEBUG] Encryption failed, using raw payload: ${encError}`);
-          finalPayload = payload;
-        }
-      }
-      
-      // Calculate checksum
-      const checksumData = Buffer.concat([header, finalPayload]);
+      // Calculate checksum (simple sum of all bytes)
+      const preChecksumData = Buffer.concat([header, payload]);
       let checksum = 0;
-      for (let i = 0; i < checksumData.length; i++) {
-        checksum += checksumData[i];
+      for (let i = 0; i < preChecksumData.length; i++) {
+        checksum = (checksum + preChecksumData[i]) & 0xFF;
       }
-      checksum = checksum & 0xFF;
       
       // Final packet
-      const packet = Buffer.concat([header, finalPayload, Buffer.from([checksum])]);
+      const packet = Buffer.concat([header, payload, Buffer.from([checksum])]);
       
-      this.log(`[DEBUG] Tuya BLE packet (cmd ${commandType}): ${packet.toString('hex')}`);
+      this.log(`[DEBUG] Tuya BLE packet (cmd 0x${commandType.toString(16)}): ${packet.toString('hex')}`);
       return packet;
       
     } catch (error) {
@@ -226,47 +213,31 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Tuya BLE authentication sequence
-  createLoginPacket() {
-    // Login command (0x01) with device ID
-    const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
-    return this.createTuyaBLEPacket(0x01, deviceIdBuffer);
+  // Create pairing/auth packet
+  createPairPacket() {
+    // For Fingerbot Plus firmware 2.0, try pairing command first
+    const pairData = Buffer.concat([
+      Buffer.from(this.deviceId, 'utf8'),
+      Buffer.from([0x00, 0x00]) // Additional padding
+    ]);
+    return this.createTuyaBLEPacket(0x01, pairData);
   }
 
-  createHeartbeatPacket() {
-    // Heartbeat command (0x02)
-    const timestamp = Math.floor(Date.now() / 1000);
-    const timestampBuffer = Buffer.alloc(4);
-    timestampBuffer.writeUInt32BE(timestamp, 0);
-    return this.createTuyaBLEPacket(0x02, timestampBuffer);
-  }
-
-  // Fingerbot control commands
-  createPressDPCommand() {
-    // DP command (0x06) - Fingerbot switch DP is usually 1
-    // DPS format: {dp_id: 1, dp_type: BOOL, dp_data: true}
+  // Create simple switch command for Fingerbot Plus
+  createSwitchCommand(state) {
+    // Fingerbot Plus uses simple switch commands
+    // DP 1 = switch state, DP 2 = direction (optional)
     const dpData = Buffer.from([
-      0x01,        // DP ID (1 = switch)
-      0x01,        // DP type (BOOL)
-      0x00, 0x01,  // Data length
-      0x01         // Value (true)
+      0x01,        // DP ID 1 (main switch)
+      0x01,        // DP type (BOOL) 
+      0x00, 0x01,  // Data length (1 byte)
+      state ? 0x01 : 0x00  // Value
     ]);
     return this.createTuyaBLEPacket(0x06, dpData);
   }
 
-  createReleaseDPCommand() {
-    // DP command (0x06) - Fingerbot switch DP off
-    const dpData = Buffer.from([
-      0x01,        // DP ID (1 = switch)
-      0x01,        // DP type (BOOL)
-      0x00, 0x01,  // Data length
-      0x00         // Value (false)
-    ]);
-    return this.createTuyaBLEPacket(0x06, dpData);
-  }
-
-  createStatusQueryPacket() {
-    // Query device status (0x08)
+  // Create status query
+  createStatusQuery() {
     return this.createTuyaBLEPacket(0x08, Buffer.alloc(0));
   }
 
@@ -361,7 +332,6 @@ class MoesFingerbotAccessory {
       this.connecting = true;
       this.currentPeripheral = peripheral;
       this.isAuthenticated = false;
-      this.sequenceNumber = 0;
       this.sessionKey = null;
 
       let connectionTimeout = null;
@@ -393,7 +363,7 @@ class MoesFingerbotAccessory {
         cleanup();
         this.forceDisconnect();
         reject(new Error('Connection timeout'));
-      }, 20000);
+      }, 15000);
 
       peripheral.connect((error) => {
         if (error) {
@@ -405,204 +375,183 @@ class MoesFingerbotAccessory {
 
         this.log('[DEBUG] Connected, discovering services...');
         
-        setTimeout(() => {
-          if (peripheral.state !== 'connected') {
+        // Immediate service discovery
+        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
+          if (error) {
+            this.log(`[DEBUG] Service discovery error: ${error}`);
             cleanup();
-            return reject(new Error('Device disconnected before service discovery'));
+            this.forceDisconnect();
+            return reject(error);
           }
 
-          peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-            if (error) {
-              this.log(`[DEBUG] Service discovery error: ${error}`);
-              cleanup();
-              this.forceDisconnect();
-              return reject(error);
-            }
+          if (peripheral.state !== 'connected') {
+            cleanup();
+            return reject(new Error('Device disconnected during service discovery'));
+          }
 
-            if (peripheral.state !== 'connected') {
-              cleanup();
-              return reject(new Error('Device disconnected during service discovery'));
-            }
+          this.log(`[DEBUG] Discovered ${services?.length || 0} services, ${characteristics?.length || 0} characteristics`);
 
-            clearTimeout(connectionTimeout);
-            connectionTimeout = setTimeout(() => {
-              this.log('[DEBUG] Operation timeout');
-              cleanup();
-              this.forceDisconnect();
-              reject(new Error('Operation timeout'));
-            }, 15000);
+          // Find the correct characteristics
+          const writeChar = characteristics.find(char => char.uuid === '2b11');
+          const notifyChar = characteristics.find(char => char.uuid === '2b10');
 
-            this.handleTuyaBLESequence(services, characteristics, peripheral, () => {
-              cleanup();
-              resolve();
-            }, (error) => {
-              cleanup();
-              reject(error);
-            });
-          });
-        }, 1000);
+          if (!writeChar) {
+            this.log('[DEBUG] No write characteristic (2b11) found');
+            cleanup();
+            this.forceDisconnect();
+            return reject(new Error('No write characteristic found'));
+          }
+
+          this.log(`[DEBUG] Using write characteristic: ${writeChar.uuid}`);
+          if (notifyChar) {
+            this.log(`[DEBUG] Using notify characteristic: ${notifyChar.uuid}`);
+          }
+
+          this.executeFingerbot(writeChar, notifyChar, peripheral, cleanup, resolve, reject);
+        });
       });
     });
   }
 
-  handleTuyaBLESequence(services, characteristics, peripheral, resolve, reject) {
-    this.log(`[DEBUG] Discovered ${services?.length || 0} services, ${characteristics?.length || 0} characteristics`);
+  executeFingerbot(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
+    this.log('[DEBUG] Starting Fingerbot command sequence...');
     
-    if (!characteristics || characteristics.length === 0) {
-      this.forceDisconnect();
-      return reject(new Error('No characteristics found'));
-    }
-
-    // Find Tuya BLE characteristics
-    const writeChar = characteristics.find(char => char.uuid === '2b11') ||
-                     characteristics.find(char => char.properties.includes('writeWithoutResponse')) ||
-                     characteristics.find(char => char.properties.includes('write'));
-
-    const notifyChar = characteristics.find(char => char.uuid === '2b10') ||
-                      characteristics.find(char => char.properties.includes('notify'));
-
-    if (!writeChar) {
-      this.log('[DEBUG] No writable characteristic found');
-      this.forceDisconnect();
-      return reject(new Error('No writable characteristic found'));
-    }
-
-    this.log(`[DEBUG] Using write characteristic: ${writeChar.uuid}`);
-    if (notifyChar) {
-      this.log(`[DEBUG] Using notify characteristic: ${notifyChar.uuid}`);
-    }
-
-    this.executeTuyaBLEAuthentication(writeChar, notifyChar, peripheral, resolve, reject);
-  }
-
-  executeTuyaBLEAuthentication(writeChar, notifyChar, peripheral, resolve, reject) {
-    this.log('[DEBUG] Starting Tuya BLE authentication sequence...');
-
-    // Generate session key first
     this.generateSessionKey();
+    
+    let commandStep = 0;
+    let operationTimeout = null;
+    let stepCompleted = false;
 
-    let authStep = 0;
-    let authTimeout = null;
-    let responseReceived = false;
+    // Set overall operation timeout
+    operationTimeout = setTimeout(() => {
+      this.log('[DEBUG] Overall operation timeout');
+      cleanup();
+      this.forceDisconnect();
+      reject(new Error('Operation timeout'));
+    }, 10000);
 
-    const stepTimeout = () => {
-      authTimeout = setTimeout(() => {
-        if (!responseReceived) {
-          this.log(`[DEBUG] Auth step ${authStep} timeout, proceeding anyway...`);
-          nextStep();
-        }
-      }, 2000);
-    };
-
-    const nextStep = () => {
-      if (authTimeout) {
-        clearTimeout(authTimeout);
-        authTimeout = null;
-      }
-      responseReceived = false;
-      authStep++;
-      executeAuthStep();
-    };
-
-    // Set up notification handler if available
+    // Set up notifications if available
     if (notifyChar) {
-      const notifyHandler = (data) => {
-        this.log(`[DEBUG] Auth response: ${data.toString('hex')}`);
-        responseReceived = true;
-        
-        // Parse response if needed
-        if (data.length >= 7) {
-          const cmdType = data[6]; // Command type is usually at offset 6
-          this.log(`[DEBUG] Response command type: 0x${cmdType.toString(16)}`);
-          
-          if (cmdType === 0x01) {
-            this.log('[DEBUG] Login response received');
-            this.isAuthenticated = true;
-          } else if (cmdType === 0x06) {
-            this.log('[DEBUG] DP command response received');
-          }
-        }
-        
-        nextStep();
-      };
-
       notifyChar.subscribe((error) => {
         if (error) {
-          this.log(`[DEBUG] Error subscribing to notifications: ${error}`);
+          this.log(`[DEBUG] Notification subscription error: ${error}`);
         } else {
-          this.log(`[DEBUG] Subscribed to notifications`);
-          notifyChar.on('data', notifyHandler);
+          this.log('[DEBUG] Subscribed to notifications');
+          
+          notifyChar.on('data', (data) => {
+            this.log(`[DEBUG] Notification received: ${data.toString('hex')}`);
+            // Parse response for battery level, status, etc.
+            this.parseNotificationData(data);
+          });
         }
       });
     }
 
-    const executeAuthStep = () => {
+    const executeNextStep = () => {
+      commandStep++;
+      stepCompleted = false;
+      
       if (peripheral.state !== 'connected') {
-        return reject(new Error('Device disconnected during authentication'));
+        cleanup();
+        return reject(new Error('Device disconnected during command sequence'));
       }
 
       let packet = null;
-      
-      switch (authStep) {
+      let stepDelay = 200; // Default delay between steps
+
+      switch (commandStep) {
         case 1:
-          this.log('[DEBUG] Step 1: Sending login packet...');
-          packet = this.createLoginPacket();
+          this.log('[DEBUG] Step 1: Sending status query...');
+          packet = this.createStatusQuery();
+          stepDelay = 300;
           break;
           
         case 2:
-          this.log('[DEBUG] Step 2: Sending heartbeat...');
-          packet = this.createHeartbeatPacket();
+          this.log('[DEBUG] Step 2: Sending switch ON command...');
+          packet = this.createSwitchCommand(true);
+          stepDelay = this.pressTime; // Hold for press duration
           break;
           
         case 3:
-          this.log('[DEBUG] Step 3: Sending status query...');
-          packet = this.createStatusQueryPacket();
+          this.log('[DEBUG] Step 3: Sending switch OFF command...');
+          packet = this.createSwitchCommand(false);
+          stepDelay = 300;
           break;
           
         case 4:
-          this.log('[DEBUG] Step 4: Sending press command...');
-          packet = this.createPressDPCommand();
-          // After sending the press command, wait pressTime before proceeding to release
-          setTimeout(nextStep, this.pressTime);
-          return; // Prevent automatic nextStep
-        case 5:
-          this.log('[DEBUG] Step 5: Sending release command...');
-          packet = this.createReleaseDPCommand();
-          setTimeout(() => {
-            this.log('[DEBUG] Tuya BLE sequence completed');
-            this.forceDisconnect();
-            resolve();
-          }, 300); // Short delay after release
+          this.log('[DEBUG] Step 4: Final status query...');
+          packet = this.createStatusQuery();
+          stepDelay = 200;
           break;
           
         default:
-          this.log('[DEBUG] Authentication sequence completed');
+          this.log('[DEBUG] Command sequence completed successfully');
+          clearTimeout(operationTimeout);
+          cleanup();
           this.forceDisconnect();
           resolve();
           return;
       }
 
       if (packet) {
-        writeChar.write(packet, false, (error) => {
+        const useResponse = writeChar.properties.includes('writeWithoutResponse');
+        writeChar.write(packet, !useResponse, (error) => {
           if (error) {
-            this.log(`[DEBUG] Error in auth step ${authStep}: ${error}`);
-            // Continue anyway
-            setTimeout(nextStep, 100);
+            this.log(`[DEBUG] Error in step ${commandStep}: ${error}`);
+            clearTimeout(operationTimeout);
+            cleanup();
+            this.forceDisconnect();
+            return reject(error);
           } else {
-            this.log(`[DEBUG] Auth step ${authStep} sent successfully`);
-            if (!notifyChar || authStep >= 4) {
-              // No notifications or in control phase, proceed automatically
-              setTimeout(nextStep, authStep >= 4 ? 200 : 500);
-            } else {
-              stepTimeout();
-            }
+            this.log(`[DEBUG] Step ${commandStep} sent successfully`);
+            stepCompleted = true;
+            
+            // Schedule next step
+            setTimeout(() => {
+              if (stepCompleted) {
+                executeNextStep();
+              }
+            }, stepDelay);
           }
         });
       }
     };
 
-    // Start authentication sequence
-    executeAuthStep();
+    // Start command sequence
+    setTimeout(executeNextStep, 100);
+  }
+
+  parseNotificationData(data) {
+    try {
+      if (data.length >= 8) {
+        // Basic Tuya BLE response parsing
+        const header = data.readUInt16BE(0);
+        if (header === 0x55aa || header === 0xaa55) {
+          const cmdType = data[5]; // Command type usually at offset 5
+          this.log(`[DEBUG] Response command type: 0x${cmdType.toString(16)}`);
+          
+          // Look for battery level in status responses
+          if (cmdType === 0x08 && data.length > 10) {
+            // Try to extract battery level from status response
+            for (let i = 6; i < data.length - 2; i++) {
+              if (data[i] === 0x02) { // DP ID 2 might be battery
+                const dpType = data[i + 1];
+                if (dpType === 0x02 && i + 5 < data.length) { // INTEGER type
+                  const batteryLevel = data.readUInt32BE(i + 2) & 0xFF;
+                  if (batteryLevel <= 100) {
+                    this.batteryLevel = batteryLevel;
+                    this.log(`[DEBUG] Battery level updated: ${batteryLevel}%`);
+                    this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, batteryLevel);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.log(`[DEBUG] Error parsing notification: ${error}`);
+    }
   }
 
   async validateDeviceOnStartup() {
@@ -613,8 +562,9 @@ class MoesFingerbotAccessory {
     const discoverHandler = async (peripheral) => {
       if (peripheral.address === this.address && !found) {
         found = true;
-        noble.removeListener('discover', discoverHandler); // <-- Add this line
+        noble.removeListener('discover', discoverHandler);
         this.log(`[DEBUG] [Startup] Found Fingerbot: ${peripheral.address}`);
+        
         try {
           noble.stopScanning();
         } catch (e) {}
@@ -625,6 +575,7 @@ class MoesFingerbotAccessory {
             this.log(`[DEBUG] [Startup] Connection error: ${error}`);
             return;
           }
+          
           this.log('[DEBUG] [Startup] Connected, discovering services...');
           peripheral.discoverAllServicesAndCharacteristics((err, services, characteristics) => {
             if (err) {
@@ -633,8 +584,21 @@ class MoesFingerbotAccessory {
               this.log(`[DEBUG] [Startup] Discovered ${services.length} services, ${characteristics.length} characteristics`);
               services.forEach(s => this.log(`[DEBUG] [Startup] Service: ${s.uuid}`));
               characteristics.forEach(c => this.log(`[DEBUG] [Startup] Characteristic: ${c.uuid}, properties: ${JSON.stringify(c.properties)}`));
+              
+              // Try to read device info if available
+              const deviceNameChar = characteristics.find(c => c.uuid === '2a00');
+              if (deviceNameChar) {
+                deviceNameChar.read((err, data) => {
+                  if (!err && data) {
+                    this.log(`[DEBUG] [Startup] Device name: ${data.toString()}`);
+                  }
+                });
+              }
             }
-            peripheral.disconnect();
+            
+            setTimeout(() => {
+              peripheral.disconnect();
+            }, 500);
           });
         });
 
@@ -655,7 +619,9 @@ class MoesFingerbotAccessory {
     }
 
     scanTimeout = setTimeout(() => {
-      noble.stopScanning();
+      try {
+        noble.stopScanning();
+      } catch (e) {}
       noble.removeListener('discover', discoverHandler);
       if (!found) {
         this.log('[DEBUG] [Startup] Could not find Fingerbot during initial scan');
