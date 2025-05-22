@@ -717,7 +717,156 @@ class MoesFingerbotAccessory {
       }
     ];
   }
-  getBatteryTestConfigurations() {
+  // EXTENDED COMMAND DIAGNOSTIC: More advanced approaches including authentication
+  getExtendedCommandTestConfigurations() {
+    return [
+      {
+        name: "Auth + DP1 BOOL sequence",
+        commands: [
+          () => this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8')), // Login first
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // Then DP1 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]))  // Then DP1 = false
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "Heartbeat + DP1 sequence",
+        commands: [
+          () => {
+            const timestamp = Math.floor(Date.now() / 1000);
+            const timestampBuffer = Buffer.alloc(4);
+            timestampBuffer.writeUInt32BE(timestamp, 0);
+            return this.createTuyaBLEPacket(0x02, timestampBuffer);
+          },
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]))
+        ],
+        delay: 1000
+      },
+      {
+        name: "DP101 BOOL (extended DP range)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x65, 0x01, 0x00, 0x01, 0x01])) // DP101 = true
+        ],
+        delay: 500
+      },
+      {
+        name: "DP102 BOOL",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x66, 0x01, 0x00, 0x01, 0x01])) // DP102 = true
+        ],
+        delay: 500
+      },
+      {
+        name: "DP103 BOOL", 
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x67, 0x01, 0x00, 0x01, 0x01])) // DP103 = true
+        ],
+        delay: 500
+      },
+      {
+        name: "DP1 with enum type (0x04)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x04, 0x00, 0x01, 0x01])) // DP1, ENUM, value 1
+        ],
+        delay: 500
+      },
+      {
+        name: "DP1 raw data type (0x00)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x00, 0x00, 0x01, 0x01])) // DP1, RAW, value 1
+        ],
+        delay: 500
+      },
+      {
+        name: "Direct motor command 0x0A",
+        commands: [
+          () => this.createTuyaBLEPacket(0x0A, Buffer.from([0x01, 0x01])) // Motor control
+        ],
+        delay: 500
+      },
+      {
+        name: "Device control 0x0B",
+        commands: [
+          () => this.createTuyaBLEPacket(0x0B, Buffer.from([0x01])) // Device control
+        ],
+        delay: 500
+      },
+      {
+        name: "Multiple DP command (batch)",
+        commands: [
+          () => {
+            // Multiple DPs in one packet: DP1=true, DP2=true
+            const dp1 = Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]);
+            const dp2 = Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]);
+            return this.createTuyaBLEPacket(0x06, Buffer.concat([dp1, dp2]));
+          }
+        ],
+        delay: 500
+      },
+      {
+        name: "Auth + Status + DP1 (full sequence)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8')), // Login
+          () => this.createTuyaBLEPacket(0x08, Buffer.alloc(0)), // Status query
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // DP1 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]))  // DP1 = false
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "Press with timing data",
+        commands: [
+          () => {
+            // DP1 = true with timing/duration info
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x03, 0xE8])); // DP1, INT, 1000ms
+          }
+        ],
+        delay: 1000
+      }
+    ];
+  }
+
+  // Manual extended test trigger
+  async testExtendedCommands() {
+    this.log('[EXTENDED-DIAG] Starting extended command diagnostic...');
+    if (this.currentOperation || this.connecting) {
+      throw new Error('Device busy - try again later');
+    }
+    
+    return new Promise((resolve, reject) => {
+      this.forceDisconnect();
+
+      const testConfigs = this.getExtendedCommandTestConfigurations();
+      let testIndex = 0;
+
+      const runNextExtendedTest = () => {
+        if (testIndex >= testConfigs.length) {
+          this.log(`[EXTENDED-DIAG] All extended tests completed! Check if any made the Fingerbot move.`);
+          resolve();
+          return;
+        }
+
+        const config = testConfigs[testIndex];
+        this.log(`[EXTENDED-DIAG] Extended Test ${testIndex + 1}/${testConfigs.length}: ${config.name}`);
+        this.log(`[EXTENDED-DIAG] ** WATCH THE FINGERBOT NOW ** - Test starting in 3 seconds...`);
+        
+        setTimeout(() => {
+          testIndex++;
+          this.connectAndTestCommand(config)
+            .then(() => {
+              this.log(`[EXTENDED-DIAG] Extended test "${config.name}" completed. Did the Fingerbot move?`);
+              setTimeout(runNextExtendedTest, 4000); // Longer delay between extended tests
+            })
+            .catch((error) => {
+              this.log(`[EXTENDED-DIAG] Extended test "${config.name}" failed: ${error.message}`);
+              setTimeout(runNextExtendedTest, 3000);
+            });
+        }, 3000); // Longer warning delay
+      };
+
+      runNextExtendedTest();
+    });
+  }
     return [
       {
         name: "Status query (0x08) - standard",
@@ -945,9 +1094,21 @@ class MoesFingerbotAccessory {
 
       const runNextCommandTest = () => {
         if (testIndex >= testConfigs.length) {
-          this.log(`[COMMAND-DIAG] All command tests completed! Check if any made the Fingerbot move.`);
-          this.log(`[COMMAND-DIAG] If you saw movement, note which test number worked and we'll use that format.`);
-          resolve();
+          this.log(`[COMMAND-DIAG] First round tests completed!`);
+          this.log(`[COMMAND-DIAG] Starting EXTENDED diagnostic with authentication sequences...`);
+          
+          // Run extended tests
+          this.runExtendedDiagnostic()
+            .then(() => {
+              this.log(`[COMMAND-DIAG] All diagnostic tests completed! If no movement was seen, the device may need:`);
+              this.log(`[COMMAND-DIAG] 1. Different firmware-specific commands`);
+              this.log(`[COMMAND-DIAG] 2. Encrypted payloads with proper authentication`);
+              this.log(`[COMMAND-DIAG] 3. Physical button press to activate pairing mode first`);
+              resolve();
+            })
+            .catch(() => {
+              resolve();
+            });
           return;
         }
 
@@ -970,6 +1131,41 @@ class MoesFingerbotAccessory {
       };
 
       runNextCommandTest();
+    });
+  }
+
+  async runExtendedDiagnostic() {
+    return new Promise((resolve, reject) => {
+      const testConfigs = this.getExtendedCommandTestConfigurations();
+      let testIndex = 0;
+
+      const runNextExtendedTest = () => {
+        if (testIndex >= testConfigs.length) {
+          this.log(`[EXTENDED-DIAG] All extended tests completed!`);
+          resolve();
+          return;
+        }
+
+        const config = testConfigs[testIndex];
+        this.log(`[EXTENDED-DIAG] Extended Test ${testIndex + 1}/${testConfigs.length}: ${config.name}`);
+        this.log(`[EXTENDED-DIAG] ** WATCH THE FINGERBOT NOW ** - Test starting in 3 seconds...`);
+        
+        setTimeout(() => {
+          testIndex++;
+          this.connectAndTestCommand(config)
+            .then(() => {
+              this.log(`[EXTENDED-DIAG] Extended test "${config.name}" completed. Did the Fingerbot move?`);
+              setTimeout(runNextExtendedTest, 4000); // Longer delay between extended tests
+            })
+            .catch((error) => {
+              this.log(`[EXTENDED-DIAG] Extended test "${config.name}" failed: ${error.message}`);
+              setTimeout(runNextExtendedTest, 3000);
+            });
+        }, 3000); // Longer warning delay
+      };
+
+      runNextExtendedTest();
+    });
     });
   }
 
