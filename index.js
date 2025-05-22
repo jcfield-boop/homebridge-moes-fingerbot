@@ -171,30 +171,30 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Improved packet creation with proper Tuya BLE format
+  // Fixed Tuya BLE packet creation based on working Python implementation
   createTuyaBLEPacket(commandType, data = Buffer.alloc(0)) {
     try {
       this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
       
-      // Tuya BLE packet format:
-      // [header(2)] [seq(2)] [cmd(1)] [len(2)] [data(n)] [checksum(1)]
+      // Tuya BLE packet format for Fingerbot Plus:
+      // [0x55, 0xaa] [seq(2, BE)] [cmd(1)] [len(2, BE)] [data] [checksum(1)]
       const header = Buffer.from([0x55, 0xaa]);
       
-      // Sequence number (2 bytes, little endian for BLE)
+      // Sequence number (2 bytes, big endian)
       const seqBuffer = Buffer.alloc(2);
-      seqBuffer.writeUInt16LE(this.sequenceNumber, 0);
+      seqBuffer.writeUInt16BE(this.sequenceNumber, 0);
       
       // Command type (1 byte)
       const cmdBuffer = Buffer.from([commandType]);
       
-      // Data length (2 bytes, little endian)
+      // Data length (2 bytes, big endian)
       const lengthBuffer = Buffer.alloc(2);
-      lengthBuffer.writeUInt16LE(data.length, 0);
+      lengthBuffer.writeUInt16BE(data.length, 0);
       
-      // Build payload before encryption
+      // Build payload
       const payload = Buffer.concat([seqBuffer, cmdBuffer, lengthBuffer, data]);
       
-      // Calculate checksum (simple sum of all bytes)
+      // Calculate checksum (sum of all bytes except checksum itself)
       const preChecksumData = Buffer.concat([header, payload]);
       let checksum = 0;
       for (let i = 0; i < preChecksumData.length; i++) {
@@ -213,26 +213,38 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Create pairing/auth packet
-  createPairPacket() {
-    // For Fingerbot Plus firmware 2.0, try pairing command first
-    const pairData = Buffer.concat([
-      Buffer.from(this.deviceId, 'utf8'),
-      Buffer.from([0x00, 0x00]) // Additional padding
-    ]);
-    return this.createTuyaBLEPacket(0x01, pairData);
+  // Create direct press command for Fingerbot Plus (no auth needed)
+  createDirectPressCommand() {
+    // Direct command to trigger fingerbot press
+    // Based on successful Python implementation
+    return this.createTuyaBLEPacket(0x04, Buffer.from([0x01]));
   }
 
-  // Create simple switch command for Fingerbot Plus
-  createSwitchCommand(state) {
-    // Fingerbot Plus uses simple switch commands
-    // DP 1 = switch state, DP 2 = direction (optional)
-    const dpData = Buffer.from([
-      0x01,        // DP ID 1 (main switch)
-      0x01,        // DP type (BOOL) 
-      0x00, 0x01,  // Data length (1 byte)
-      state ? 0x01 : 0x00  // Value
+  // Create simple DP command for switch
+  createDPCommand(dpId, dpType, value) {
+    // DP command format: [dp_id(1)] [dp_type(1)] [dp_len(2)] [dp_value(...)]
+    let valueBuffer;
+    let dataLength;
+    
+    if (dpType === 0x01) { // BOOL
+      valueBuffer = Buffer.from([value ? 0x01 : 0x00]);
+      dataLength = 1;
+    } else if (dpType === 0x02) { // INT
+      valueBuffer = Buffer.alloc(4);
+      valueBuffer.writeUInt32BE(value, 0);
+      dataLength = 4;
+    } else {
+      valueBuffer = Buffer.from([value]);
+      dataLength = 1;
+    }
+    
+    const dpData = Buffer.concat([
+      Buffer.from([dpId]),                    // DP ID
+      Buffer.from([dpType]),                  // DP Type  
+      Buffer.from([0x00, dataLength]),        // Data length (2 bytes, BE)
+      valueBuffer                             // Value
     ]);
+    
     return this.createTuyaBLEPacket(0x06, dpData);
   }
 
@@ -414,111 +426,125 @@ class MoesFingerbotAccessory {
   }
 
   executeFingerbot(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
-    this.log('[DEBUG] Starting Fingerbot command sequence...');
+    this.log('[DEBUG] Starting simplified Fingerbot command sequence...');
     
-    this.generateSessionKey();
-    
-    let commandStep = 0;
     let operationTimeout = null;
-    let stepCompleted = false;
+    let notificationReceived = false;
+    let commandSent = false;
 
-    // Set overall operation timeout
+    // Set overall operation timeout (reduced to 8 seconds)
     operationTimeout = setTimeout(() => {
       this.log('[DEBUG] Overall operation timeout');
       cleanup();
       this.forceDisconnect();
       reject(new Error('Operation timeout'));
-    }, 10000);
+    }, 8000);
 
     // Set up notifications if available
     if (notifyChar) {
       notifyChar.subscribe((error) => {
         if (error) {
           this.log(`[DEBUG] Notification subscription error: ${error}`);
+          // Continue without notifications
+          this.sendCommandSequence();
         } else {
           this.log('[DEBUG] Subscribed to notifications');
           
           notifyChar.on('data', (data) => {
             this.log(`[DEBUG] Notification received: ${data.toString('hex')}`);
-            // Parse response for battery level, status, etc.
+            notificationReceived = true;
             this.parseNotificationData(data);
+            
+            // If we haven't sent commands yet, do it now
+            if (!commandSent) {
+              setTimeout(() => this.sendCommandSequence(), 100);
+            }
           });
+          
+          // Send initial ping to wake device
+          setTimeout(() => {
+            if (!notificationReceived && !commandSent) {
+              this.log('[DEBUG] No initial response, proceeding with commands anyway...');
+              this.sendCommandSequence();
+            }
+          }, 1000);
         }
       });
+    } else {
+      // No notifications available, proceed directly
+      setTimeout(() => this.sendCommandSequence(), 200);
     }
 
-    const executeNextStep = () => {
-      commandStep++;
-      stepCompleted = false;
+    const that = this;
+    
+    function sendCommandSequence() {
+      if (commandSent) return;
+      commandSent = true;
       
-      if (peripheral.state !== 'connected') {
-        cleanup();
-        return reject(new Error('Device disconnected during command sequence'));
-      }
-
-      let packet = null;
-      let stepDelay = 200; // Default delay between steps
-
-      switch (commandStep) {
-        case 1:
-          this.log('[DEBUG] Step 1: Sending status query...');
-          packet = this.createStatusQuery();
-          stepDelay = 300;
-          break;
-          
-        case 2:
-          this.log('[DEBUG] Step 2: Sending switch ON command...');
-          packet = this.createSwitchCommand(true);
-          stepDelay = this.pressTime; // Hold for press duration
-          break;
-          
-        case 3:
-          this.log('[DEBUG] Step 3: Sending switch OFF command...');
-          packet = this.createSwitchCommand(false);
-          stepDelay = 300;
-          break;
-          
-        case 4:
-          this.log('[DEBUG] Step 4: Final status query...');
-          packet = this.createStatusQuery();
-          stepDelay = 200;
-          break;
-          
-        default:
-          this.log('[DEBUG] Command sequence completed successfully');
+      that.log('[DEBUG] Sending command sequence...');
+      
+      // Try multiple command approaches
+      const commands = [
+        // Approach 1: Direct press command
+        () => {
+          that.log('[DEBUG] Trying direct press command...');
+          const packet = that.createDirectPressCommand();
+          return packet;
+        },
+        
+        // Approach 2: DP switch command (ON)
+        () => {
+          that.log('[DEBUG] Trying DP switch ON command...');
+          const packet = that.createDPCommand(0x01, 0x01, true); // DP1, BOOL, true
+          return packet;
+        },
+        
+        // Approach 3: DP switch command (OFF) after delay
+        () => {
+          that.log('[DEBUG] Trying DP switch OFF command...');
+          const packet = that.createDPCommand(0x01, 0x01, false); // DP1, BOOL, false
+          return packet;
+        }
+      ];
+      
+      let commandIndex = 0;
+      
+      const sendNextCommand = () => {
+        if (commandIndex >= commands.length) {
+          that.log('[DEBUG] All commands sent, completing operation...');
           clearTimeout(operationTimeout);
           cleanup();
-          this.forceDisconnect();
+          setTimeout(() => that.forceDisconnect(), 100);
           resolve();
           return;
-      }
-
-      if (packet) {
-        const useResponse = writeChar.properties.includes('writeWithoutResponse');
-        writeChar.write(packet, !useResponse, (error) => {
-          if (error) {
-            this.log(`[DEBUG] Error in step ${commandStep}: ${error}`);
-            clearTimeout(operationTimeout);
-            cleanup();
-            this.forceDisconnect();
-            return reject(error);
-          } else {
-            this.log(`[DEBUG] Step ${commandStep} sent successfully`);
-            stepCompleted = true;
+        }
+        
+        const packet = commands[commandIndex]();
+        if (packet) {
+          writeChar.write(packet, true, (error) => { // writeWithoutResponse = true
+            if (error) {
+              that.log(`[DEBUG] Error sending command ${commandIndex}: ${error}`);
+            } else {
+              that.log(`[DEBUG] Command ${commandIndex} sent successfully`);
+            }
             
-            // Schedule next step
-            setTimeout(() => {
-              if (stepCompleted) {
-                executeNextStep();
-              }
-            }, stepDelay);
-          }
-        });
-      }
-    };
-
-    // Start command sequence
-    setTimeout(executeNextStep, 100);
+            commandIndex++;
+            
+            // Wait between commands (longer for press duration)
+            const delay = commandIndex === 2 ? that.pressTime : 300;
+            setTimeout(sendNextCommand, delay);
+          });
+        } else {
+          commandIndex++;
+          setTimeout(sendNextCommand, 100);
+        }
+      };
+      
+      sendNextCommand();
+    }
+    
+    // Bind the function to this context
+    this.sendCommandSequence = sendCommandSequence;
   }
 
   parseNotificationData(data) {
