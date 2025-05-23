@@ -165,20 +165,51 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // WORKING PACKET FORMAT - from successful diagnostic test
-  createTuyaBLEPacket(commandType, data = Buffer.alloc(0)) {
+  // WORKING PACKET FORMAT - with proper Tuya BLE encryption
+  createTuyaBLEPacket(commandType, data = Buffer.alloc(0), encrypt = false) {
     try {
       this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
       
-      // Working format: [0x55, 0xaa] [seq(2, BE)] [cmd(1)] [len(2, BE)] [data] [checksum(1)]
+      // Tuya BLE format: [0x55, 0xaa] [seq(2, BE)] [cmd(1)] [len(2, BE)] [data] [checksum(1)]
       const header = Buffer.from([0x55, 0xaa]);
       const seqBuffer = Buffer.alloc(2);
       seqBuffer.writeUInt16BE(this.sequenceNumber, 0);
       const cmdBuffer = Buffer.from([commandType]);
-      const lengthBuffer = Buffer.alloc(2);
-      lengthBuffer.writeUInt16BE(data.length, 0);
       
-      const payload = Buffer.concat([seqBuffer, cmdBuffer, lengthBuffer, data]);
+      let finalData = data;
+      
+      // Encrypt data if requested and we have session key
+      if (encrypt && this.sessionKey && (commandType === 0x06 || commandType === 0x07)) {
+        try {
+          // Create proper Tuya BLE encrypted payload
+          const timestamp = Math.floor(Date.now() / 1000);
+          const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
+          
+          // Build authenticated data: deviceId + timestamp + command data
+          const timestampBuffer = Buffer.alloc(4);
+          timestampBuffer.writeUInt32BE(timestamp, 0);
+          const authData = Buffer.concat([deviceIdBuffer, timestampBuffer, data]);
+          
+          // Pad to 16-byte boundary for AES
+          const paddingNeeded = 16 - (authData.length % 16);
+          const paddedData = Buffer.concat([authData, Buffer.alloc(paddingNeeded, paddingNeeded)]);
+          
+          // Encrypt with AES-128-ECB
+          const cipher = crypto.createCipher('aes-128-ecb', this.sessionKey);
+          cipher.setAutoPadding(false);
+          finalData = Buffer.concat([cipher.update(paddedData), cipher.final()]);
+          
+          this.log(`[DEBUG] Encrypted payload (${finalData.length} bytes): ${finalData.toString('hex')}`);
+        } catch (encError) {
+          this.log(`[DEBUG] Encryption failed: ${encError}, using raw data`);
+          finalData = data;
+        }
+      }
+      
+      const lengthBuffer = Buffer.alloc(2);
+      lengthBuffer.writeUInt16BE(finalData.length, 0);
+      
+      const payload = Buffer.concat([seqBuffer, cmdBuffer, lengthBuffer, finalData]);
       const preChecksum = Buffer.concat([header, payload]);
       
       let checksum = 0;
@@ -187,7 +218,7 @@ class MoesFingerbotAccessory {
       }
       
       const packet = Buffer.concat([header, payload, Buffer.from([checksum])]);
-      this.log(`[DEBUG] Tuya BLE packet (cmd 0x${commandType.toString(16)}): ${packet.toString('hex')}`);
+      this.log(`[DEBUG] Tuya BLE packet (cmd 0x${commandType.toString(16)}, encrypted: ${encrypt}): ${packet.toString('hex')}`);
       return packet;
       
     } catch (error) {
@@ -196,70 +227,77 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // COMMAND DIAGNOSTIC: Test different command approaches to find what makes the Fingerbot move
+  // COMMAND DIAGNOSTIC: Test encrypted and authenticated approaches
   getCommandTestConfigurations() {
     return [
       {
-        name: "Current DP1 BOOL (true/false sequence)",
+        name: "Basic DP1 BOOL (no encryption)",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // DP1 = true
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]))  // DP1 = false
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), false), // DP1 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), false)  // DP1 = false
         ],
         delay: this.pressTime
       },
       {
-        name: "DP2 BOOL (alternative switch DP)",
+        name: "ENCRYPTED DP1 BOOL (with auth)",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01])), // DP2 = true
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]))  // DP2 = false
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true), // DP1 = true (encrypted)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true)  // DP1 = false (encrypted)
         ],
         delay: this.pressTime
       },
       {
-        name: "Auth + DP1 BOOL sequence",
+        name: "Full Auth + Encrypted DP1",
         commands: [
-          () => this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8')), // Login first
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // Then DP1 = true
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]))  // Then DP1 = false
+          () => this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false), // Login
+          () => {
+            // Heartbeat with timestamp
+            const timestamp = Math.floor(Date.now() / 1000);
+            const timestampBuffer = Buffer.alloc(4);
+            timestampBuffer.writeUInt32BE(timestamp, 0);
+            return this.createTuyaBLEPacket(0x02, timestampBuffer, false);
+          },
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true), // Encrypted DP1 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true)  // Encrypted DP1 = false
         ],
         delay: this.pressTime
       },
       {
-        name: "DP1 INTEGER (0 to 1)",
+        name: "ENCRYPTED DP2 BOOL",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01])), // DP1 = 1 (int)
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]))  // DP1 = 0 (int)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true), // DP2 = true (encrypted)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true)  // DP2 = false (encrypted)
         ],
         delay: this.pressTime
       },
       {
-        name: "DP1 single press (BOOL true only)",
+        name: "ENCRYPTED DP1 INTEGER",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])) // DP1 = true only
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01]), true), // DP1 = 1 (encrypted)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]), true)  // DP1 = 0 (encrypted)
+        ],
+        delay: this.pressTime
+      },
+      {
+        name: "Single ENCRYPTED DP1 press",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true) // Just DP1 = true (encrypted)
+        ],
+        delay: 1000
+      },
+      {
+        name: "Command 0x07 with ENCRYPTED DP query",
+        commands: [
+          () => this.createTuyaBLEPacket(0x07, Buffer.from([0x01]), true) // Query DP1 (encrypted)
         ],
         delay: 500
       },
       {
-        name: "Direct command 0x04 (raw press)",
+        name: "Raw 0x04 command ENCRYPTED",
         commands: [
-          () => this.createTuyaBLEPacket(0x04, Buffer.from([0x01])) // Direct press command
+          () => this.createTuyaBLEPacket(0x04, Buffer.from([0x01]), true) // Raw command (encrypted)
         ],
         delay: 500
-      },
-      {
-        name: "DP101 BOOL (extended range)",
-        commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x65, 0x01, 0x00, 0x01, 0x01])) // DP101 = true
-        ],
-        delay: 500
-      },
-      {
-        name: "Multiple DPs (press + direction)",
-        commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01])), // DP1 = true (press)
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]))  // DP2 = true (direction?)
-        ],
-        delay: 800
       }
     ];
   }
@@ -568,6 +606,9 @@ class MoesFingerbotAccessory {
   executeTestSequence(writeChar, notifyChar, peripheral, testConfig, cleanup, resolve, reject) {
     this.log(`[COMMAND-DIAG] Executing test: ${testConfig.name}`);
     
+    // Generate session key for encryption before starting
+    this.generateSessionKey();
+    
     let operationTimeout = null;
     let sequenceComplete = false;
 
@@ -578,7 +619,7 @@ class MoesFingerbotAccessory {
         this.forceDisconnect();
         resolve(); // Don't reject, just complete the test
       }
-    }, 8000);
+    }, 10000); // Longer timeout for encrypted commands
 
     // Set up notifications to see if device responds
     if (notifyChar) {
@@ -590,6 +631,17 @@ class MoesFingerbotAccessory {
           
           notifyChar.on('data', (data) => {
             this.log(`[COMMAND-DIAG] Device response: ${data.toString('hex')}`);
+            // Parse response for authentication status
+            if (data.length >= 7) {
+              const cmdType = data[6];
+              if (cmdType === 0x01) {
+                this.log(`[COMMAND-DIAG] Login response received - device may be authenticated`);
+              } else if (cmdType === 0x02) {
+                this.log(`[COMMAND-DIAG] Heartbeat response received`);
+              } else if (cmdType === 0x06) {
+                this.log(`[COMMAND-DIAG] DP command response received - device acknowledged command`);
+              }
+            }
           });
         }
       });
@@ -627,8 +679,16 @@ class MoesFingerbotAccessory {
               this.log(`[COMMAND-DIAG] Command ${commandIndex} sent successfully`);
             }
 
-            // Wait before next command (or completion)
-            const delay = commandIndex >= testConfig.commands.length ? testConfig.delay : 300;
+            // Wait before next command - longer for auth commands
+            let delay = 300;
+            if (commandIndex === 1 && testConfig.name.includes("Auth")) {
+              delay = 1000; // Wait longer after login
+            } else if (commandIndex === 2 && testConfig.name.includes("Auth")) {
+              delay = 500; // Wait after heartbeat
+            } else if (commandIndex >= testConfig.commands.length) {
+              delay = testConfig.delay; // Final delay
+            }
+            
             setTimeout(sendNextCommand, delay);
           });
         } else {
@@ -639,8 +699,8 @@ class MoesFingerbotAccessory {
       sendNextCommand();
     };
 
-    // Start the test sequence
-    setTimeout(executeTest, 500);
+    // Start the test sequence with a longer delay for encryption setup
+    setTimeout(executeTest, 1000);
   }
 
   async connectAndPress(peripheral) {
@@ -663,6 +723,9 @@ class MoesFingerbotAccessory {
 
   executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
     this.log('[DEBUG] Executing WORKING Fingerbot sequence...');
+    
+    // Generate session key for potential encryption
+    this.generateSessionKey();
     
     let operationTimeout = null;
     let sequenceComplete = false;
@@ -691,27 +754,39 @@ class MoesFingerbotAccessory {
       });
     }
 
-    // Execute the working press+release sequence with more conservative timing
+    // Execute the working press+release sequence (try encrypted first, then fallback)
     const executeSequence = () => {
-      // Generate fresh packets
-      const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]));
-      const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]));
+      // Try encrypted commands first since device works with Tuya app
+      const pressPacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true);
+      const releasePacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true);
+      
+      // Fallback to unencrypted
+      const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), false);
+      const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), false);
 
-      if (!pressPacket || !releasePacket) {
+      if (!pressPacketEncrypted || !releasePacketEncrypted) {
         sequenceComplete = true;
         clearTimeout(operationTimeout);
         cleanup();
         this.forceDisconnect();
-        return reject(new Error('Failed to create command packets'));
+        return reject(new Error('Failed to create encrypted command packets'));
       }
 
-      this.log('[DEBUG] Sending press command...');
-      writeChar.write(pressPacket, true, (error) => {
+      this.log('[DEBUG] Sending ENCRYPTED press command...');
+      writeChar.write(pressPacketEncrypted, true, (error) => {
         if (error) {
-          this.log(`[DEBUG] Press command error: ${error}`);
-          // Don't fail immediately - device might still work
+          this.log(`[DEBUG] Encrypted press command error: ${error}`);
+          // Fallback to unencrypted
+          this.log('[DEBUG] Trying unencrypted press command...');
+          writeChar.write(pressPacket, true, (fallbackError) => {
+            if (fallbackError) {
+              this.log(`[DEBUG] Unencrypted press also failed: ${fallbackError}`);
+            } else {
+              this.log('[DEBUG] Unencrypted press command sent successfully');
+            }
+          });
         } else {
-          this.log('[DEBUG] Press command sent successfully');
+          this.log('[DEBUG] Encrypted press command sent successfully');
         }
 
         // Wait for press duration, then send release
@@ -720,12 +795,21 @@ class MoesFingerbotAccessory {
             return; // Already completed or disconnected
           }
 
-          this.log('[DEBUG] Sending release command...');
-          writeChar.write(releasePacket, true, (error) => {
+          this.log('[DEBUG] Sending ENCRYPTED release command...');
+          writeChar.write(releasePacketEncrypted, true, (error) => {
             if (error) {
-              this.log(`[DEBUG] Release command error: ${error}`);
+              this.log(`[DEBUG] Encrypted release command error: ${error}`);
+              // Fallback to unencrypted
+              this.log('[DEBUG] Trying unencrypted release command...');
+              writeChar.write(releasePacket, true, (fallbackError) => {
+                if (fallbackError) {
+                  this.log(`[DEBUG] Unencrypted release also failed: ${fallbackError}`);
+                } else {
+                  this.log('[DEBUG] Unencrypted release command sent successfully');
+                }
+              });
             } else {
-              this.log('[DEBUG] Release command sent successfully');
+              this.log('[DEBUG] Encrypted release command sent successfully');
             }
 
             // Complete the operation
