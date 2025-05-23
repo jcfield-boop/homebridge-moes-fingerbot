@@ -34,7 +34,7 @@ class MoesFingerbotAccessory {
 
     // Configuration
     this.pressTime = config.pressTime || 3000;
-    this.scanDuration = config.scanDuration || 10000;
+    this.scanDuration = config.scanDuration || 5000; // Reduced from 10000
     this.scanRetries = config.scanRetries || 3;
     this.connectionTimeout = config.connectionTimeout || 15000;
     
@@ -94,8 +94,10 @@ class MoesFingerbotAccessory {
     });
 
     noble.on('discover', (peripheral) => {
-      // Log all discovered devices for debugging
-      this.log(`Discovered device: ${peripheral.address} (${peripheral.advertisement.localName || 'unnamed'})`);
+      // Only log our target device or nearby strong signals for debugging
+      if (peripheral.address === this.address || peripheral.rssi > -70) {
+        this.log(`Discovered device: ${peripheral.address} (${peripheral.advertisement.localName || 'unnamed'}, RSSI: ${peripheral.rssi})`);
+      }
     });
   }
 
@@ -223,8 +225,7 @@ class MoesFingerbotAccessory {
         noble.removeAllListeners('discover');
         
         const discoverHandler = async (peripheral) => {
-          this.log(`Checking device: ${peripheral.address} vs ${this.address}`);
-          
+          // Only log the target device discovery
           if (peripheral.address === this.address && !peripheralFound) {
             peripheralFound = true;
             this.log(`Found target device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
@@ -274,7 +275,7 @@ class MoesFingerbotAccessory {
             reject(error);
             return;
           }
-          this.log('Bluetooth scanning started');
+          this.log(`BLE scanning active (${this.scanDuration/1000}s timeout)`);
         });
 
         scanTimeout = setTimeout(() => {
@@ -414,7 +415,7 @@ class MoesFingerbotAccessory {
     }
     
     // Authenticate with device
-    await this.authenticateDevice(writeChar);
+    await this.authenticateDevice(writeChar, notifyChar);
     
     // Execute press based on device model
     if (this.deviceModel === 'plus') {
@@ -436,7 +437,7 @@ class MoesFingerbotAccessory {
         // Setup notification handler for battery response
         const notificationHandler = (data) => {
           try {
-            this.log(`Received notification data: ${data.toString('hex')}`);
+            this.log(`Battery response received: ${data.toString('hex')}`);
             const parsedData = this.parseTuyaResponse(data);
             if (parsedData && parsedData.command === 0x08) {
               // Status response - look for battery DP (typically DP12)
@@ -445,6 +446,7 @@ class MoesFingerbotAccessory {
                 batteryLevel = battery;
                 clearTimeout(responseTimeout);
                 notifyChar.removeListener('data', notificationHandler);
+                this.log(`Battery level found: ${battery}%`);
                 resolve(batteryLevel);
               }
             }
@@ -459,26 +461,27 @@ class MoesFingerbotAccessory {
 
       try {
         // Authenticate first
-        await this.authenticateDevice(writeChar);
+        await this.authenticateDevice(writeChar, notifyChar);
         
         // Request device status (includes battery)
-        this.log('Requesting device status...');
+        this.log('Requesting device status for battery level...');
         const statusPacket = this.createTuyaPacket(0x08, Buffer.alloc(0), false);
         await this.writeCharacteristic(writeChar, statusPacket);
         
         responseTimeout = setTimeout(() => {
-          this.log('Battery status request timeout');
+          this.log('Battery status request timeout - no response received');
           if (notifyChar) {
             notifyChar.removeAllListeners('data');
           }
           resolve(-1); // Return -1 if no response
-        }, 5000);
+        }, 8000); // Increased timeout for battery reading
         
       } catch (error) {
         if (notifyChar) {
           notifyChar.removeAllListeners('data');
         }
         clearTimeout(responseTimeout);
+        this.log(`Battery reading error: ${error.message}`);
         reject(error);
       }
     });
@@ -500,23 +503,59 @@ class MoesFingerbotAccessory {
   }
 
   // Authenticate with Tuya device
-  async authenticateDevice(writeChar) {
+  async authenticateDevice(writeChar, notifyChar) {
     return new Promise(async (resolve, reject) => {
       try {
         // Generate session key
         this.generateSessionKey();
+        
+        let authTimeout = null;
+        let authenticated = false;
+        
+        // Setup response handler if notifications available
+        if (notifyChar) {
+          const authHandler = (data) => {
+            try {
+              this.log(`Auth response received: ${data.toString('hex')}`);
+              const parsedData = this.parseTuyaResponse(data);
+              
+              if (parsedData && parsedData.command === 0x01) {
+                // Authentication response received
+                clearTimeout(authTimeout);
+                notifyChar.removeListener('data', authHandler);
+                authenticated = true;
+                this.deviceAuthenticated = true;
+                this.log('Device authentication confirmed by response');
+                resolve();
+              }
+            } catch (error) {
+              this.log(`Error parsing auth response: ${error.message}`);
+            }
+          };
+          
+          notifyChar.on('data', authHandler);
+        }
         
         // Send login packet
         this.log('Sending authentication packet...');
         const loginPacket = this.createTuyaPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false);
         await this.writeCharacteristic(writeChar, loginPacket);
         
-        // Wait for authentication - increased time for reliability
-        setTimeout(() => {
-          this.deviceAuthenticated = true;
-          this.log('Device authentication completed');
-          resolve();
-        }, 2000);
+        // Set timeout for authentication - shorter if no notify, longer with notify
+        const authTimeoutMs = notifyChar ? 5000 : 2000;
+        
+        authTimeout = setTimeout(() => {
+          if (notifyChar) {
+            notifyChar.removeAllListeners('data');
+          }
+          
+          if (!authenticated) {
+            // Assume success if no response but no error either
+            this.deviceAuthenticated = true;
+            this.log('Device authentication completed (timeout assumed success)');
+            resolve();
+          }
+        }, authTimeoutMs);
         
       } catch (error) {
         this.log(`Authentication failed: ${error.message}`);
@@ -724,8 +763,9 @@ class MoesFingerbotAccessory {
           this.log(`Write error: ${error.message}`);
           reject(error);
         } else {
-          this.log('Write completed successfully');
-          resolve();
+          this.log(`Write completed successfully`);
+          // Small delay to allow device processing
+          setTimeout(() => resolve(), 100);
         }
       });
     });
