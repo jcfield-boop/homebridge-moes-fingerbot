@@ -1,5 +1,5 @@
 {
-  "pluginAlias": "homebridge-moes-fingerbot-test",
+  "pluginAlias": "homebridge-moes-fingerbot",
   "pluginType": "accessory",
   "singular": false,
   "headerDisplay": "MOES Fingerbot BLE Test Plugin - Simplified version for testing basic communication",
@@ -10,13 +10,13 @@
       "accessory": {
         "title": "Accessory",
         "type": "string",
-        "const": "MoesFingerbotTest",
+        "const": "MoesFingerbot",
         "readOnly": true
       },
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "MOES Fingerbot Test",
+        "default": "MOES Fingerbot",
         "minLength": 1,
         "description": "The name of your fingerbot device as it will appear in HomeKit"
       },
