@@ -34,12 +34,12 @@ class MoesFingerbotAccessory {
 
     // Configuration
     this.pressTime = config.pressTime || 3000;
-    this.scanDuration = config.scanDuration || 8000; // Increased for better discovery
+    this.scanDuration = config.scanDuration || 10000;
     this.scanRetries = config.scanRetries || 3;
-    this.connectionTimeout = config.connectionTimeout || 20000; // Increased
+    this.connectionTimeout = config.connectionTimeout || 25000;
     
     // Protocol state
-    this.sequenceNumber = Math.floor(Math.random() * 65535); // Random start
+    this.sequenceNumber = Math.floor(Math.random() * 65535);
     this.sessionKey = null;
     this.deviceAuthenticated = false;
     
@@ -73,7 +73,6 @@ class MoesFingerbotAccessory {
     if (noble.state === 'poweredOn') {
       this.bluetoothReady = true;
       this.log('Bluetooth adapter already ready');
-      // Initial battery check after a short delay
       setTimeout(() => this.updateBatteryLevel(), 5000);
     }
   }
@@ -84,7 +83,6 @@ class MoesFingerbotAccessory {
       if (state === 'poweredOn') {
         this.bluetoothReady = true;
         this.log('Bluetooth adapter ready');
-        // Initial battery check when Bluetooth becomes ready
         setTimeout(() => this.updateBatteryLevel(), 5000);
       } else {
         this.bluetoothReady = false;
@@ -94,7 +92,6 @@ class MoesFingerbotAccessory {
     });
 
     noble.on('discover', (peripheral) => {
-      // Only log our target device or nearby strong signals for debugging
       if (peripheral.address === this.address || peripheral.rssi > -70) {
         this.log(`Discovered device: ${peripheral.address} (${peripheral.advertisement.localName || 'unnamed'}, RSSI: ${peripheral.rssi})`);
       }
@@ -121,7 +118,7 @@ class MoesFingerbotAccessory {
     }
     
     this.log(`Unknown device pattern for deviceId: ${this.deviceId} - treating as Plus model`);
-    return 'plus'; // Default to plus model for unknown devices
+    return 'plus';
   }
 
   getServices() {
@@ -139,7 +136,6 @@ class MoesFingerbotAccessory {
           this.isOn = true;
           callback(null);
           
-          // Reset switch after press time
           setTimeout(() => {
             this.isOn = false;
             this.switchService.updateCharacteristic(Characteristic.On, false);
@@ -159,7 +155,6 @@ class MoesFingerbotAccessory {
     callback(null, level);
   }
 
-  // Check if we can perform BLE operations
   canPerformBLEOperation() {
     if (!this.bluetoothReady) {
       throw new Error('Bluetooth not ready');
@@ -170,7 +165,6 @@ class MoesFingerbotAccessory {
     return true;
   }
 
-  // Main entry point for button press
   async pressButton() {
     try {
       this.canPerformBLEOperation();
@@ -187,7 +181,6 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Battery level update
   async updateBatteryLevel() {
     try {
       this.canPerformBLEOperation();
@@ -210,7 +203,6 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Scan for and connect to device
   async scanAndConnect() {
     return new Promise((resolve, reject) => {
       this.forceDisconnect();
@@ -225,7 +217,6 @@ class MoesFingerbotAccessory {
         noble.removeAllListeners('discover');
         
         const discoverHandler = async (peripheral) => {
-          // Only log the target device discovery
           if (peripheral.address === this.address && !peripheralFound) {
             peripheralFound = true;
             this.log(`Found target device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
@@ -234,7 +225,6 @@ class MoesFingerbotAccessory {
             noble.stopScanning();
             noble.removeListener('discover', discoverHandler);
 
-            // Try to connect with retries
             let connectionAttempts = 0;
             const maxConnectionAttempts = 3;
             
@@ -267,7 +257,6 @@ class MoesFingerbotAccessory {
         
         this.log(`Scanning for device (attempt ${retryCount + 1}/${this.scanRetries + 1})...`);
         
-        // Start scanning - allow duplicates to ensure we see advertising devices
         noble.startScanning([], true, (error) => {
           if (error) {
             this.log(`Scan start error: ${error.message}`);
@@ -298,7 +287,6 @@ class MoesFingerbotAccessory {
     });
   }
 
-  // Connect to peripheral and discover services
   async connectToPeripheral(peripheral) {
     return new Promise((resolve, reject) => {
       this.currentPeripheral = peripheral;
@@ -330,7 +318,6 @@ class MoesFingerbotAccessory {
 
         this.log('Connected successfully, waiting for stability...');
         
-        // Wait longer for connection to stabilize
         setTimeout(() => {
           this.log('Discovering services and characteristics...');
           
@@ -345,15 +332,10 @@ class MoesFingerbotAccessory {
 
             this.log(`Found ${services.length} services and ${characteristics.length} characteristics`);
             
-            // Find required characteristics for Tuya BLE
+            // Find Tuya BLE characteristics
             let writeChar = characteristics.find(char =>
               char.uuid.replace(/^0+/, '') === '2b11'
             );
-            if (!writeChar) {
-              writeChar = characteristics.find(char =>
-                char.uuid.toLowerCase().includes('2b11')
-              );
-            }
             if (!writeChar) {
               writeChar = characteristics.find(char =>
                 char.properties.includes('write') || char.properties.includes('writeWithoutResponse')
@@ -363,11 +345,6 @@ class MoesFingerbotAccessory {
             let notifyChar = characteristics.find(char =>
               char.uuid.replace(/^0+/, '') === '2b10'
             );
-            if (!notifyChar) {
-              notifyChar = characteristics.find(char =>
-                char.uuid.toLowerCase().includes('2b10')
-              );
-            }
             if (!notifyChar) {
               notifyChar = characteristics.find(char =>
                 char.properties.includes('notify') || char.properties.includes('indicate')
@@ -389,12 +366,11 @@ class MoesFingerbotAccessory {
             this.log('Service discovery completed successfully');
             resolve({ peripheral, writeChar, notifyChar });
           });
-        }, 4000); // Increased wait time for stability
+        }, 4000);
       });
     });
   }
 
-  // Helper method to clean up connections
   cleanupConnection(peripheral) {
     try {
       if (peripheral && peripheral.state === 'connected') {
@@ -405,21 +381,17 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Execute button press sequence
   async executeButtonPress(connectionInfo) {
     const { peripheral, writeChar, notifyChar } = connectionInfo;
     
-    // Setup notifications if available
     if (notifyChar) {
       await this.setupNotifications(notifyChar);
-      await this.delay(500); // Allow notifications to settle
+      await this.delay(500);
     }
     
-    // Authenticate with device
     await this.authenticateDevice(writeChar, notifyChar);
-    await this.delay(1000); // Wait after authentication
+    await this.delay(1000);
     
-    // Execute press based on device model
     if (this.deviceModel === 'plus') {
       await this.executeFingerbotPlusPress(writeChar);
     } else {
@@ -427,7 +399,6 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Read battery level from device
   async readBatteryLevel(connectionInfo) {
     const { peripheral, writeChar, notifyChar } = connectionInfo;
     
@@ -436,13 +407,11 @@ class MoesFingerbotAccessory {
       let batteryLevel = -1;
 
       if (notifyChar) {
-        // Setup notification handler for battery response
         const notificationHandler = (data) => {
           try {
             this.log(`Battery response received: ${data.toString('hex')}`);
             const parsedData = this.parseTuyaResponse(data);
             if (parsedData && (parsedData.command === 0x08 || parsedData.command === 0x07)) {
-              // Status response - look for battery DP
               const battery = this.extractBatteryFromStatus(parsedData.payload);
               if (battery >= 0) {
                 batteryLevel = battery;
@@ -463,11 +432,9 @@ class MoesFingerbotAccessory {
       }
 
       try {
-        // Authenticate first
         await this.authenticateDevice(writeChar, notifyChar);
         await this.delay(1000);
         
-        // Request device status (includes battery)
         this.log('Requesting device status for battery level...');
         const statusPacket = this.createTuyaPacket(0x08, Buffer.alloc(0));
         await this.writeCharacteristic(writeChar, statusPacket);
@@ -477,8 +444,8 @@ class MoesFingerbotAccessory {
           if (notifyChar) {
             notifyChar.removeAllListeners('data');
           }
-          resolve(-1); // Return -1 if no response
-        }, 10000); // Increased timeout for battery reading
+          resolve(-1);
+        }, 10000);
         
       } catch (error) {
         if (notifyChar) {
@@ -491,7 +458,6 @@ class MoesFingerbotAccessory {
     });
   }
 
-  // Setup BLE notifications
   async setupNotifications(notifyChar) {
     return new Promise((resolve, reject) => {
       notifyChar.subscribe((error) => {
@@ -506,17 +472,14 @@ class MoesFingerbotAccessory {
     });
   }
 
-  // Authenticate with Tuya device - Fixed for Fingerbot Plus
   async authenticateDevice(writeChar, notifyChar) {
     return new Promise(async (resolve, reject) => {
       try {
-        // Generate session key first
         this.generateSessionKey();
         
         let authTimeout = null;
         let authenticated = false;
         
-        // Setup response handler if notifications available
         if (notifyChar) {
           const authHandler = (data) => {
             try {
@@ -524,10 +487,9 @@ class MoesFingerbotAccessory {
               const parsedData = this.parseTuyaResponse(data);
               
               if (parsedData) {
-                this.log(`Auth response: cmd=0x${parsedData.command.toString(16)}, len=${parsedData.length}`);
+                this.log(`Auth response: cmd=0x${parsedData.command.toString(16).padStart(2, '0')}, len=${parsedData.length}`);
                 
                 if (parsedData.command === 0x01 || parsedData.command === 0x02 || parsedData.command === 0x03) {
-                  // Authentication response received
                   clearTimeout(authTimeout);
                   notifyChar.removeListener('data', authHandler);
                   authenticated = true;
@@ -544,37 +506,26 @@ class MoesFingerbotAccessory {
           notifyChar.on('data', authHandler);
         }
         
-        // Create proper authentication payload
-        // For Tuya BLE, the device ID should be exactly 16 bytes
-        let deviceUuid = Buffer.alloc(16, 0x00);
-        const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
-        
-        // Copy device ID to UUID buffer, truncating if necessary
-        const copyLength = Math.min(deviceIdBuffer.length, 16);
-        deviceIdBuffer.copy(deviceUuid, 0, 0, copyLength);
-        
-        this.log(`Device UUID for auth: ${deviceUuid.toString('hex')}`);
-        this.log(`Original device ID: "${this.deviceId}"`);
-        
-        // Send authentication packet (0x01 - Login/Authentication)
+        // Step 1: Send login packet with device UUID
+        const deviceUuid = this.createDeviceUUID();
         this.log('Sending authentication packet...');
         const loginPacket = this.createTuyaPacket(0x01, deviceUuid);
         await this.writeCharacteristic(writeChar, loginPacket);
-        
-        // Wait before next command
         await this.delay(1000);
         
-        // Send session key exchange packet (0x02 - Key Exchange)  
+        // Step 2: Send session key exchange packet
         this.log('Sending session key exchange packet...');
+        const timestamp = Math.floor(Date.now() / 1000);
         const sessionData = Buffer.concat([
-          Buffer.from([0x00, 0x00, 0x00, 0x00]), // Timestamp placeholder
-          this.sessionKey.slice(0, 16) // First 16 bytes of session key
+          Buffer.alloc(4),
+          this.sessionKey.slice(0, 16)
         ]);
+        sessionData.writeUInt32BE(timestamp, 0);
+        
         const sessionPacket = this.createTuyaPacket(0x02, sessionData);
         await this.writeCharacteristic(writeChar, sessionPacket);
         
-        // Set timeout for authentication
-        const authTimeoutMs = notifyChar ? 8000 : 5000; // Increased timeout
+        const authTimeoutMs = notifyChar ? 10000 : 8000;
         
         authTimeout = setTimeout(() => {
           if (notifyChar) {
@@ -582,9 +533,8 @@ class MoesFingerbotAccessory {
           }
           
           if (!authenticated) {
-            // For some devices, no response might be normal
             this.deviceAuthenticated = true;
-            this.log('Device authentication timeout - assuming success');
+            this.log('Authentication timeout - assuming success for Fingerbot device');
             resolve();
           }
         }, authTimeoutMs);
@@ -596,215 +546,51 @@ class MoesFingerbotAccessory {
     });
   }
 
-  // --- 1. AES-128-CBC encryption with IV and PKCS7 padding ---
-  encryptDataCBC(data) {
-    if (!this.sessionKey) {
-      throw new Error('Session key not available for encryption');
-    }
-    // Generate random IV
-    const iv = crypto.randomBytes(16);
-    // PKCS7 padding
-    const padding = 16 - (data.length % 16);
-    const padded = Buffer.concat([data, Buffer.alloc(padding, padding)]);
-    const cipher = crypto.createCipheriv('aes-128-cbc', this.sessionKey, iv);
-    cipher.setAutoPadding(false);
-    const encrypted = Buffer.concat([cipher.update(padded), cipher.final()]);
-    this.log(`Encrypted (CBC) result: ${encrypted.length} bytes, IV: ${iv.toString('hex')}`);
-    return { encrypted, iv };
-  }
-
-  // --- 2. Tuya DP packet builders using DPmarkdown.md schema ---
-  createDPBooleanPacket(dpId, value) {
-    // Boolean: type=1, length=1, value=0x01 or 0x00
-    const buf = Buffer.alloc(6);
-    buf.writeUInt8(dpId, 0); // DP ID
-    buf.writeUInt8(1, 1);    // DP Type (Boolean)
-    buf.writeUInt16BE(1, 2); // Length
-    buf.writeUInt8(value ? 1 : 0, 4); // Value
-    return buf;
-  }
-
-  createDPEnumPacket(dpId, enumValue) {
-    // Enum: type=4, length=1, value=enum index
-    const buf = Buffer.alloc(6);
-    buf.writeUInt8(dpId, 0);
-    buf.writeUInt8(4, 1);
-    buf.writeUInt16BE(1, 2);
-    buf.writeUInt8(enumValue, 4);
-    return buf;
-  }
-
-  createDPIntPacket(dpId, intValue) {
-    // Integer: type=2, length=4, value=UInt32BE
-    const buf = Buffer.alloc(8);
-    buf.writeUInt8(dpId, 0);
-    buf.writeUInt8(2, 1);
-    buf.writeUInt16BE(4, 2);
-    buf.writeUInt32BE(intValue, 4);
-    return buf;
-  }
-
-  // --- 3. Assemble Tuya BLE packet with security flag, IV, and encrypted data ---
-  createTuyaPacket(commandType, dpBuffers = [], encrypt = false) {
-    try {
-      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
-
-      let payload = Buffer.isBuffer(dpBuffers)
-        ? dpBuffers
-        : Buffer.concat(dpBuffers);
-
-      let finalData = payload;
-      let iv = null;
-      let securityFlag = 0x00;
-
-      if (encrypt && this.sessionKey && this.deviceAuthenticated) {
-        // Use CBC encryption with IV
-        const encResult = this.encryptDataCBC(payload);
-        finalData = encResult.encrypted;
-        iv = encResult.iv;
-        securityFlag = 0x05; // Tuya BLE security flag for CBC+IV
-        // Prepend security flag and IV to data
-        finalData = Buffer.concat([Buffer.from([securityFlag]), iv, finalData]);
-      }
-
-      // Tuya BLE packet format:
-      // [0x55AA] [seq(2,BE)] [cmd(1)] [len(2,BE)] [data] [checksum(1)]
-      const packet = Buffer.alloc(8 + finalData.length);
-      let offset = 0;
-
-      // Header
-      packet.writeUInt16BE(0x55AA, offset); offset += 2;
-      // Sequence number
-      packet.writeUInt16BE(this.sequenceNumber, offset); offset += 2;
-      // Command
-      packet.writeUInt8(commandType, offset); offset += 1;
-      // Data length
-      packet.writeUInt16BE(finalData.length, offset); offset += 2;
-      // Data
-      if (finalData.length > 0) {
-        finalData.copy(packet, offset); offset += finalData.length;
-      }
-      // Checksum
-      let checksum = 0;
-      for (let i = 0; i < packet.length - 1; i++) {
-        checksum = (checksum + packet[i]) & 0xFF;
-      }
-      packet.writeUInt8(checksum, offset);
-
-      this.log(`TX: ${packet.toString('hex')}`);
-      return packet;
-    } catch (error) {
-      this.log(`Packet creation failed: ${error.message}`);
-      throw error;
-    }
-  }
-
-  // --- 4. Example usage in executeFingerbotPlusPress ---
-  async executeFingerbotPlusPress(writeChar) {
-    this.log('Executing Fingerbot Plus press sequence...');
-    try {
-      // Set mode to click (DP2, enum 0)
-      const modeDP = this.createDPEnumPacket(2, 0);
-      const modePacket = this.createTuyaPacket(0x06, [modeDP], true);
-      await this.writeCharacteristic(writeChar, modePacket);
-      await this.delay(500);
-
-      // Set sustain time (DP4, value, in 100ms units)
-      const sustainTime = Math.floor(this.pressTime / 100);
-      const sustainDP = this.createDPIntPacket(4, sustainTime);
-      const sustainPacket = this.createTuyaPacket(0x06, [sustainDP], true);
-      await this.writeCharacteristic(writeChar, sustainPacket);
-      await this.delay(500);
-
-      // Trigger press (DP1, bool true)
-      const pressDP = this.createDPBooleanPacket(1, true);
-      const pressPacket = this.createTuyaPacket(0x06, [pressDP], true);
-      await this.writeCharacteristic(writeChar, pressPacket);
-
-      // Wait for the device to complete the press cycle
-      await this.delay(this.pressTime + 1000);
-    } catch (error) {
-      this.log(`Fingerbot Plus press failed: ${error.message}`);
-      throw error;
-    }
-  }
-
-  // Execute generic press sequence
-  async executeGenericPress(writeChar) {
-    this.log('Executing generic press sequence...');
+  createDeviceUUID() {
+    const deviceUuid = Buffer.alloc(16, 0x00);
+    const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
     
-    // Press
-    const pressData = this.createDPPacket(1, 'bool', true);
-    const pressPacket = this.createTuyaPacket(0x06, pressData, true);
-    await this.writeCharacteristic(writeChar, pressPacket);
-    await this.delay(this.pressTime);
+    const copyLength = Math.min(deviceIdBuffer.length, 16);
+    deviceIdBuffer.copy(deviceUuid, 0, 0, copyLength);
     
-    // Release  
-    const releaseData = this.createDPPacket(1, 'bool', false);
-    const releasePacket = this.createTuyaPacket(0x06, releaseData, true);
-    await this.writeCharacteristic(writeChar, releasePacket);
+    this.log(`Device UUID for auth: ${deviceUuid.toString('hex')}`);
+    this.log(`Original device ID: "${this.deviceId}"`);
+    
+    return deviceUuid;
   }
 
-  // Create Tuya DP (Data Point) packet - Fixed format
-  createDPPacket(dpId, type, value) {
-    let dpType, dpData;
-    
-    switch(type) {
-      case 'bool':
-        dpType = 0x01;
-        dpData = Buffer.from([value ? 0x01 : 0x00]);
-        break;
-      case 'value':
-        dpType = 0x02;
-        dpData = Buffer.alloc(4);
-        dpData.writeUInt32BE(value, 0);
-        break;
-      case 'enum':
-        dpType = 0x04;
-        dpData = Buffer.from([value]);
-        break;
-      default:
-        throw new Error(`Unknown DP type: ${type}`);
-    }
-    
-    const dpPacket = Buffer.alloc(4 + dpData.length);
-    dpPacket.writeUInt8(dpId, 0);        // DP ID
-    dpPacket.writeUInt8(dpType, 1);      // DP Type
-    dpPacket.writeUInt16BE(dpData.length, 2); // DP Length (big endian)
-    dpData.copy(dpPacket, 4);            // DP Data
-    
-    this.log(`Created DP${dpId} packet: ${dpPacket.toString('hex')}`);
-    return dpPacket;
-  }
-
-  // Generate session key for encryption - Fixed
   generateSessionKey() {
     try {
       let keyBuffer;
+      const localKey = this.localKey.toString();
       
-      // Handle different key formats
-      if (this.localKey.length === 32 && /^[0-9a-fA-F]+$/.test(this.localKey)) {
-        // Hex key - from Tuya IoT platform
-        keyBuffer = Buffer.from(this.localKey, 'hex');
+      this.log(`Local key length: ${localKey.length}, content: "${localKey}"`);
+      
+      if (localKey.length === 32 && /^[0-9a-fA-F]+$/.test(localKey)) {
+        keyBuffer = Buffer.from(localKey, 'hex');
         this.log('Using hex format local key');
       } else {
-        // UTF-8 key - pad/truncate to 16 bytes
-        const keyString = this.localKey.toString();
-        keyBuffer = Buffer.from(keyString, 'utf8');
+        const keyBytes = Buffer.from(localKey, 'utf8');
         
-        if (keyBuffer.length > 16) {
-          keyBuffer = keyBuffer.slice(0, 16);
-          this.log('Truncated key to 16 bytes');
-        } else if (keyBuffer.length < 16) {
-          const padded = Buffer.alloc(16, 0x00);
-          keyBuffer.copy(padded);
-          keyBuffer = padded;
-          this.log('Padded key to 16 bytes');
+        if (keyBytes.length === 16) {
+          keyBuffer = keyBytes;
+          this.log('Using UTF-8 key (exact 16 bytes)');
+        } else if (keyBytes.length < 16) {
+          keyBuffer = Buffer.alloc(16, 0x00);
+          keyBytes.copy(keyBuffer, 0);
+          this.log(`Padded UTF-8 key from ${keyBytes.length} to 16 bytes`);
+        } else {
+          keyBuffer = keyBytes.slice(0, 16);
+          this.log(`Truncated UTF-8 key from ${keyBytes.length} to 16 bytes`);
         }
       }
       
       this.sessionKey = keyBuffer;
       this.log(`Session key generated (${keyBuffer.length} bytes): ${this.sessionKey.toString('hex')}`);
+      
+      if (this.sessionKey.length !== 16) {
+        throw new Error(`Invalid session key length: ${this.sessionKey.length}, expected 16`);
+      }
       
     } catch (error) {
       this.log(`Session key generation failed: ${error.message}`);
@@ -812,65 +598,214 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Encrypt data using AES-128-ECB - Fixed
-  encryptData(data) {
+  async executeFingerbotPlusPress(writeChar) {
+    this.log('Executing Fingerbot Plus press sequence...');
+    try {
+      // Step 1: Set mode to click (DP2, enum 0)
+      this.log('Setting mode to click...');
+      const modeDP = this.createDPEnumPacket(2, 0);
+      const modePacket = this.createTuyaPacket(0x06, [modeDP], true);
+      await this.writeCharacteristic(writeChar, modePacket);
+      await this.delay(800);
+
+      // Step 2: Set sustain time (DP4, in 100ms units)
+      const sustainTime = Math.floor(this.pressTime / 100);
+      this.log(`Setting sustain time to ${sustainTime} (${this.pressTime}ms)...`);
+      const sustainDP = this.createDPIntPacket(4, sustainTime);
+      const sustainPacket = this.createTuyaPacket(0x06, [sustainDP], true);
+      await this.writeCharacteristic(writeChar, sustainPacket);
+      await this.delay(800);
+
+      // Step 3: Trigger press (DP1, bool true)
+      this.log('Triggering press...');
+      const pressDP = this.createDPBooleanPacket(1, true);
+      const pressPacket = this.createTuyaPacket(0x06, [pressDP], true);
+      await this.writeCharacteristic(writeChar, pressPacket);
+
+      const totalWaitTime = this.pressTime + 2000;
+      this.log(`Waiting ${totalWaitTime}ms for press cycle completion...`);
+      await this.delay(totalWaitTime);
+      
+    } catch (error) {
+      this.log(`Fingerbot Plus press failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async executeGenericPress(writeChar) {
+    this.log('Executing generic press sequence...');
+    
+    const pressData = this.createDPBooleanPacket(1, true);
+    const pressPacket = this.createTuyaPacket(0x06, pressData, true);
+    await this.writeCharacteristic(writeChar, pressPacket);
+    await this.delay(this.pressTime);
+    
+    const releaseData = this.createDPBooleanPacket(1, false);
+    const releasePacket = this.createTuyaPacket(0x06, releaseData, true);
+    await this.writeCharacteristic(writeChar, releasePacket);
+  }
+
+  createDPBooleanPacket(dpId, value) {
+    const buffer = Buffer.alloc(5);
+    let offset = 0;
+    
+    buffer.writeUInt8(dpId, offset++);
+    buffer.writeUInt8(0x01, offset++);
+    buffer.writeUInt16BE(0x0001, offset);
+    offset += 2;
+    buffer.writeUInt8(value ? 0x01 : 0x00, offset);
+    
+    this.log(`Created DP${dpId} boolean packet (${value}): ${buffer.toString('hex')}`);
+    return buffer;
+  }
+
+  createDPEnumPacket(dpId, enumValue) {
+    const buffer = Buffer.alloc(5);
+    let offset = 0;
+    
+    buffer.writeUInt8(dpId, offset++);
+    buffer.writeUInt8(0x04, offset++);
+    buffer.writeUInt16BE(0x0001, offset);
+    offset += 2;
+    buffer.writeUInt8(enumValue, offset);
+    
+    this.log(`Created DP${dpId} enum packet (${enumValue}): ${buffer.toString('hex')}`);
+    return buffer;
+  }
+
+  createDPIntPacket(dpId, intValue) {
+    const buffer = Buffer.alloc(8);
+    let offset = 0;
+    
+    buffer.writeUInt8(dpId, offset++);
+    buffer.writeUInt8(0x02, offset++);
+    buffer.writeUInt16BE(0x0004, offset);
+    offset += 2;
+    buffer.writeUInt32BE(intValue, offset);
+    
+    this.log(`Created DP${dpId} integer packet (${intValue}): ${buffer.toString('hex')}`);
+    return buffer;
+  }
+
+  createTuyaPacket(commandType, dpBuffers = [], encrypt = false) {
+    try {
+      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
+
+      let payload = Buffer.isBuffer(dpBuffers) 
+        ? dpBuffers 
+        : (Array.isArray(dpBuffers) ? Buffer.concat(dpBuffers) : Buffer.alloc(0));
+
+      let finalData = payload;
+      let securityFlag = 0x00;
+
+      if (encrypt && this.sessionKey && this.deviceAuthenticated) {
+        if (this.deviceModel === 'plus') {
+          const encResult = this.encryptDataCBC(payload);
+          securityFlag = 0x05;
+          finalData = Buffer.concat([
+            Buffer.from([securityFlag]), 
+            encResult.iv, 
+            encResult.encrypted
+          ]);
+          this.log(`Using CBC encryption with security flag 0x05`);
+        } else {
+          const encrypted = this.encryptDataECB(payload);
+          securityFlag = 0x03;
+          finalData = Buffer.concat([
+            Buffer.from([securityFlag]), 
+            encrypted
+          ]);
+          this.log(`Using ECB encryption with security flag 0x03`);
+        }
+      } else if (encrypt) {
+        this.log('Encryption requested but conditions not met - sending unencrypted');
+      }
+
+      const packet = Buffer.alloc(8 + finalData.length);
+      let offset = 0;
+
+      packet.writeUInt16BE(0x55AA, offset); offset += 2;
+      packet.writeUInt16BE(this.sequenceNumber, offset); offset += 2;
+      packet.writeUInt8(commandType, offset); offset += 1;
+      packet.writeUInt16BE(finalData.length, offset); offset += 2;
+      if (finalData.length > 0) {
+        finalData.copy(packet, offset); 
+        offset += finalData.length;
+      }
+      
+      let checksum = 0;
+      for (let i = 0; i < packet.length - 1; i++) {
+        checksum = (checksum + packet[i]) & 0xFF;
+      }
+      packet.writeUInt8(checksum, offset);
+
+      this.log(`TX (${encrypt ? 'encrypted' : 'plain'}): ${packet.toString('hex')}`);
+      return packet;
+    } catch (error) {
+      this.log(`Packet creation failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  encryptDataCBC(data) {
     try {
       if (!this.sessionKey) {
-        throw new Error('Session key not available for decryption');
+        throw new Error('Session key not available for encryption');
       }
       
-      // Pad data to 16-byte boundary using PKCS7
-      let paddedData = Buffer.from(data);
-      const paddingNeeded = 16 - (data.length % 16);
+      const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      const iv = crypto.randomBytes(16);
       
-      if (paddingNeeded !== 16) {
-        const padding = Buffer.alloc(paddingNeeded, paddingNeeded);
-        paddedData = Buffer.concat([data, padding]);
+      const paddingLength = 16 - (dataBuffer.length % 16);
+      const paddedData = Buffer.concat([
+        dataBuffer, 
+        Buffer.alloc(paddingLength, paddingLength)
+      ]);
+      
+      this.log(`Encrypting ${dataBuffer.length} bytes (padded to ${paddedData.length}) with CBC`);
+      
+      const cipher = crypto.createCipheriv('aes-128-cbc', this.sessionKey, iv);
+      cipher.setAutoPadding(false);
+      
+      const encrypted = Buffer.concat([cipher.update(paddedData), cipher.final()]);
+      this.log(`CBC encrypted result: ${encrypted.length} bytes, IV: ${iv.toString('hex')}`);
+      
+      return { encrypted, iv };
+    } catch (error) {
+      this.log(`CBC encryption failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  encryptDataECB(data) {
+    try {
+      if (!this.sessionKey) {
+        throw new Error('Session key not available for encryption');
       }
       
-      this.log(`Encrypting ${data.length} bytes (padded to ${paddedData.length})`);
+      const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      
+      const paddingLength = 16 - (dataBuffer.length % 16);
+      const paddedData = Buffer.concat([
+        dataBuffer, 
+        Buffer.alloc(paddingLength, paddingLength)
+      ]);
+      
+      this.log(`Encrypting ${dataBuffer.length} bytes (padded to ${paddedData.length}) with ECB`);
       
       const cipher = crypto.createCipheriv('aes-128-ecb', this.sessionKey, null);
       cipher.setAutoPadding(false);
       
       const encrypted = Buffer.concat([cipher.update(paddedData), cipher.final()]);
-      this.log(`Encrypted result: ${encrypted.length} bytes`);
+      this.log(`ECB encrypted result: ${encrypted.length} bytes`);
       
       return encrypted;
     } catch (error) {
-      this.log(`Encryption failed: ${error.message}`);
+      this.log(`ECB encryption failed: ${error.message}`);
       throw error;
     }
   }
 
-  // Decrypt data using AES-128-ECB - Fixed
-  decryptData(encryptedData) {
-    try {
-      if (!this.sessionKey) {
-        throw new Error('Session key not available for decryption');
-      }
-      
-      const decipher = crypto.createDecipheriv('aes-128-ecb', this.sessionKey, null);
-      decipher.setAutoPadding(false);
-      
-      const decrypted = Buffer.concat([decipher.update(encryptedData), decipher.final()]);
-      
-      // Remove PKCS7 padding
-      if (decrypted.length > 0) {
-        const paddingLength = decrypted[decrypted.length - 1];
-        if (paddingLength > 0 && paddingLength <= 16) {
-          return decrypted.slice(0, decrypted.length - paddingLength);
-        }
-      }
-      
-      return decrypted;
-    } catch (error) {
-      this.log(`Decryption failed: ${error.message}`);
-      return encryptedData; // Return original data if decryption fails
-    }
-  }
-
-  // Parse Tuya response packet
   parseTuyaResponse(data) {
     if (data.length < 8) {
       this.log(`Response too short: ${data.length} bytes`);
@@ -878,7 +813,6 @@ class MoesFingerbotAccessory {
     }
     
     try {
-      // Check for valid Tuya header (0x55AA)
       const header = data.readUInt16BE(0);
       if (header !== 0x55AA) {
         this.log(`Invalid header: 0x${header.toString(16).padStart(4, '0')}`);
@@ -900,23 +834,16 @@ class MoesFingerbotAccessory {
       this.log(`RX: ${data.toString('hex')}`);
       this.log(`Parsed: seq=${sequence}, cmd=0x${command.toString(16).padStart(2, '0')}, len=${length}`);
       
-      // Try to decrypt payload if encrypted
-      if (this.sessionKey && payload.length > 0 && payload.length % 16 === 0 && 
-          command !== 0x01 && command !== 0x02 && command !== 0x03) {
-        try {
-          const decryptedPayload = this.decryptData(payload);
-          this.log(`Decrypted payload: ${decryptedPayload.toString('hex')}`);
-          payload = decryptedPayload;
-        } catch (error) {
-          this.log(`Decryption failed, using raw payload: ${error.message}`);
-        }
+      if (this.sessionKey && payload.length > 0 && this.deviceAuthenticated) {
+        payload = this.decryptPayload(payload, command);
       }
       
       return {
         sequence,
         command,
         length,
-        payload
+        payload,
+        checksum
       };
     } catch (error) {
       this.log(`Response parsing failed: ${error.message}`);
@@ -924,11 +851,122 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Extract battery level from status payload - Enhanced
+  decryptPayload(payload, command) {
+    try {
+      if (command === 0x01 || command === 0x02 || command === 0x03) {
+        return payload;
+      }
+      
+      if (payload.length === 0) {
+        return payload;
+      }
+      
+      const securityFlag = payload.readUInt8(0);
+      this.log(`Security flag: 0x${securityFlag.toString(16).padStart(2, '0')}`);
+      
+      if (securityFlag === 0x05) {
+        if (payload.length < 17) {
+          this.log('Payload too short for CBC decryption');
+          return payload;
+        }
+        
+        const iv = payload.slice(1, 17);
+        const encryptedData = payload.slice(17);
+        
+        this.log(`CBC decryption: IV=${iv.toString('hex')}, data=${encryptedData.length} bytes`);
+        
+        const decrypted = this.decryptDataCBC(encryptedData, iv);
+        this.log(`Decrypted payload: ${decrypted.toString('hex')}`);
+        return decrypted;
+        
+      } else if (securityFlag === 0x03) {
+        const encryptedData = payload.slice(1);
+        
+        this.log(`ECB decryption: data=${encryptedData.length} bytes`);
+        
+        const decrypted = this.decryptDataECB(encryptedData);
+        this.log(`Decrypted payload: ${decrypted.toString('hex')}`);
+        return decrypted;
+        
+      } else if (securityFlag === 0x00) {
+        return payload.slice(1);
+      } else {
+        this.log(`Unknown security flag: 0x${securityFlag.toString(16)}, treating as unencrypted`);
+        return payload;
+      }
+      
+    } catch (error) {
+      this.log(`Decryption failed: ${error.message}, returning original payload`);
+      return payload;
+    }
+  }
+
+  decryptDataCBC(encryptedData, iv) {
+    try {
+      if (!this.sessionKey) {
+        throw new Error('Session key not available for decryption');
+      }
+      
+      const decipher = crypto.createDecipheriv('aes-128-cbc', this.sessionKey, iv);
+      decipher.setAutoPadding(false);
+      
+      const decrypted = Buffer.concat([decipher.update(encryptedData), decipher.final()]);
+      
+      return this.removePKCS7Padding(decrypted);
+      
+    } catch (error) {
+      this.log(`CBC decryption failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  decryptDataECB(encryptedData) {
+    try {
+      if (!this.sessionKey) {
+        throw new Error('Session key not available for decryption');
+      }
+      
+      const decipher = crypto.createDecipheriv('aes-128-ecb', this.sessionKey, null);
+      decipher.setAutoPadding(false);
+      
+      const decrypted = Buffer.concat([decipher.update(encryptedData), decipher.final()]);
+      
+      return this.removePKCS7Padding(decrypted);
+      
+    } catch (error) {
+      this.log(`ECB decryption failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  removePKCS7Padding(data) {
+    if (data.length === 0) {
+      return data;
+    }
+    
+    const paddingLength = data[data.length - 1];
+    
+    if (paddingLength > 0 && paddingLength <= 16 && paddingLength <= data.length) {
+      let validPadding = true;
+      for (let i = data.length - paddingLength; i < data.length; i++) {
+        if (data[i] !== paddingLength) {
+          validPadding = false;
+          break;
+        }
+      }
+      
+      if (validPadding) {
+        return data.slice(0, data.length - paddingLength);
+      }
+    }
+    
+    this.log('Invalid PKCS7 padding detected, returning original data');
+    return data;
+  }
+
   extractBatteryFromStatus(payload) {
     this.log(`Extracting battery from ${payload.length} byte payload: ${payload.toString('hex')}`);
     
-    // Parse Tuya DP format
     let offset = 0;
     while (offset < payload.length - 4) {
       try {
@@ -944,7 +982,6 @@ class MoesFingerbotAccessory {
         const dpData = payload.slice(offset + 4, offset + 4 + dpLength);
         this.log(`DP${dpId} type:${dpType} length:${dpLength} data:${dpData.toString('hex')}`);
         
-        // Battery is typically in DP12, DP13, or DP15 as integer value
         if ((dpId === 12 || dpId === 13 || dpId === 15 || dpId === 5) && dpType === 0x02) {
           if (dpLength === 4) {
             const batteryLevel = dpData.readUInt32BE(0);
@@ -972,7 +1009,6 @@ class MoesFingerbotAccessory {
     return -1;
   }
 
-  // Write to characteristic with promise wrapper
   async writeCharacteristic(characteristic, data) {
     return new Promise((resolve, reject) => {
       if (!characteristic) {
@@ -985,7 +1021,6 @@ class MoesFingerbotAccessory {
       
       this.log(`Writing ${data.length} bytes to characteristic ${characteristic.uuid}`);
       
-      // Prefer writeWithoutResponse for better reliability
       const useWriteWithoutResponse = characteristic.properties.includes('writeWithoutResponse');
       
       characteristic.write(data, !useWriteWithoutResponse, (error) => {
@@ -994,19 +1029,16 @@ class MoesFingerbotAccessory {
           reject(error);
         } else {
           this.log(`Write completed successfully`);
-          // Small delay to allow device processing
           setTimeout(() => resolve(), 200);
         }
       });
     });
   }
 
-  // Utility delay function
   async delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Force disconnect and cleanup
   forceDisconnect() {
     this.log('Forcing disconnect and cleanup...');
     
