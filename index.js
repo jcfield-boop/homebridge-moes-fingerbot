@@ -101,7 +101,7 @@ class MoesFingerbotAccessory {
 
   detectDeviceModel() {
     const deviceIdPatterns = {
-      'plus': ['blliqpsj', 'ndvkgsrm', 'yiihr7zh', 'neq16kgd'],
+      'plus': ['blliqpsj', 'ndvkgsrm', 'yiihr7zh', 'neq16kgd', 'bjcvqwh0', 'eb4507wa'],
       'original': ['ltak7e1p', 'y6kttvd6', 'yrnk7mnn', 'nvr2rocq', 'bnt7wajf', 'rvdceqjh', '5xhbk964'],
       'cubetouch1s': ['3yqdo5yt'],
       'cubetouch2': ['xhf790if']
@@ -118,8 +118,8 @@ class MoesFingerbotAccessory {
       }
     }
     
-    this.log(`Unknown device pattern for deviceId: ${this.deviceId}`);
-    return 'unknown';
+    this.log(`Unknown device pattern for deviceId: ${this.deviceId} - treating as Plus model`);
+    return 'plus'; // Default to plus model for unknown devices
   }
 
   getServices() {
@@ -227,19 +227,38 @@ class MoesFingerbotAccessory {
           
           if (peripheral.address === this.address && !peripheralFound) {
             peripheralFound = true;
-            this.log(`Found target device: ${peripheral.address}`);
+            this.log(`Found target device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
             
             clearTimeout(scanTimeout);
             noble.stopScanning();
             noble.removeListener('discover', discoverHandler);
 
-            try {
-              const connectionInfo = await this.connectToPeripheral(peripheral);
-              resolve(connectionInfo);
-            } catch (error) {
-              this.connecting = false;
-              reject(error);
-            }
+            // Try to connect with retries
+            let connectionAttempts = 0;
+            const maxConnectionAttempts = 3;
+            
+            const attemptConnection = async () => {
+              try {
+                connectionAttempts++;
+                this.log(`Connection attempt ${connectionAttempts}/${maxConnectionAttempts}`);
+                
+                const connectionInfo = await this.connectToPeripheral(peripheral);
+                this.connecting = false;
+                resolve(connectionInfo);
+              } catch (error) {
+                this.log(`Connection attempt ${connectionAttempts} failed: ${error.message}`);
+                
+                if (connectionAttempts < maxConnectionAttempts) {
+                  this.log(`Retrying connection in 2 seconds...`);
+                  setTimeout(attemptConnection, 2000);
+                } else {
+                  this.connecting = false;
+                  reject(new Error(`Failed to connect after ${maxConnectionAttempts} attempts: ${error.message}`));
+                }
+              }
+            };
+            
+            attemptConnection();
           }
         };
 
@@ -285,10 +304,12 @@ class MoesFingerbotAccessory {
       
       const connectionTimeout = setTimeout(() => {
         this.log('Connection timeout');
+        this.cleanupConnection(peripheral);
         reject(new Error('Connection timeout'));
       }, this.connectionTimeout);
 
-      const disconnectHandler = () => {
+      const disconnectHandler = (error) => {
+        this.log('Device disconnected during connection:', error);
         clearTimeout(connectionTimeout);
         this.currentPeripheral = null;
         reject(new Error('Device disconnected during connection'));
@@ -296,29 +317,38 @@ class MoesFingerbotAccessory {
 
       peripheral.once('disconnect', disconnectHandler);
 
+      this.log('Attempting to connect...');
       peripheral.connect((error) => {
         if (error) {
+          this.log(`Connection error: ${error.message}`);
           clearTimeout(connectionTimeout);
           peripheral.removeListener('disconnect', disconnectHandler);
           this.currentPeripheral = null;
           return reject(error);
         }
 
-        this.log('Connected, discovering services...');
+        this.log('Connected successfully, waiting for stability...');
         
-        // Wait for services to be ready
+        // Wait longer for connection to stabilize
         setTimeout(() => {
+          this.log('Discovering services and characteristics...');
+          
           peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
             clearTimeout(connectionTimeout);
             peripheral.removeListener('disconnect', disconnectHandler);
             
             if (error) {
+              this.log(`Service discovery error: ${error.message}`);
               return reject(error);
             }
 
             this.log(`Found ${services.length} services and ${characteristics.length} characteristics`);
             
-            // Log all characteristics for debugging
+            // Log all services and characteristics for debugging
+            services.forEach(service => {
+              this.log(`Service: ${service.uuid}`);
+            });
+            
             characteristics.forEach(char => {
               this.log(`Characteristic: ${char.uuid} (properties: ${char.properties.join(', ')})`);
             });
@@ -327,16 +357,51 @@ class MoesFingerbotAccessory {
             const writeChar = characteristics.find(char => char.uuid === '2b11');
             const notifyChar = characteristics.find(char => char.uuid === '2b10');
 
-            if (!writeChar) {
-              return reject(new Error('Write characteristic (2b11) not found'));
+            // Also look for alternate UUIDs that might be used
+            const altWriteChar = characteristics.find(char => 
+              char.uuid.includes('2b11') || 
+              char.properties.includes('write') || 
+              char.properties.includes('writeWithoutResponse')
+            );
+            
+            const altNotifyChar = characteristics.find(char => 
+              char.uuid.includes('2b10') || 
+              char.properties.includes('notify') || 
+              char.properties.includes('indicate')
+            );
+
+            const finalWriteChar = writeChar || altWriteChar;
+            const finalNotifyChar = notifyChar || altNotifyChar;
+
+            if (!finalWriteChar) {
+              this.log('Available characteristics:', characteristics.map(c => `${c.uuid} (${c.properties.join(',')})`).join(', '));
+              return reject(new Error('No suitable write characteristic found'));
             }
 
-            this.log('Service discovery completed');
-            resolve({ peripheral, writeChar, notifyChar });
+            this.log(`Using write characteristic: ${finalWriteChar.uuid}`);
+            if (finalNotifyChar) {
+              this.log(`Using notify characteristic: ${finalNotifyChar.uuid}`);
+            } else {
+              this.log('No notify characteristic found - will work without notifications');
+            }
+
+            this.log('Service discovery completed successfully');
+            resolve({ peripheral, writeChar: finalWriteChar, notifyChar: finalNotifyChar });
           });
-        }, 2000);
+        }, 3000); // Increased wait time for stability
       });
     });
+  }
+
+  // Helper method to clean up connections
+  cleanupConnection(peripheral) {
+    try {
+      if (peripheral && peripheral.state === 'connected') {
+        peripheral.disconnect();
+      }
+    } catch (error) {
+      this.log(`Cleanup error: ${error.message}`);
+    }
   }
 
   // Execute button press sequence
@@ -446,14 +511,15 @@ class MoesFingerbotAccessory {
         const loginPacket = this.createTuyaPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false);
         await this.writeCharacteristic(writeChar, loginPacket);
         
-        // Wait for authentication
+        // Wait for authentication - increased time for reliability
         setTimeout(() => {
           this.deviceAuthenticated = true;
-          this.log('Device authenticated');
+          this.log('Device authentication completed');
           resolve();
-        }, 1000);
+        }, 2000);
         
       } catch (error) {
+        this.log(`Authentication failed: ${error.message}`);
         reject(error);
       }
     });
@@ -640,10 +706,25 @@ class MoesFingerbotAccessory {
   // Write to characteristic with promise wrapper
   async writeCharacteristic(characteristic, data) {
     return new Promise((resolve, reject) => {
-      characteristic.write(data, true, (error) => {
+      if (!characteristic) {
+        return reject(new Error('Characteristic is null'));
+      }
+      
+      if (!data || data.length === 0) {
+        return reject(new Error('No data to write'));
+      }
+      
+      this.log(`Writing ${data.length} bytes to characteristic ${characteristic.uuid}`);
+      
+      // Use writeWithoutResponse if available, otherwise write
+      const useWriteWithoutResponse = characteristic.properties.includes('writeWithoutResponse');
+      
+      characteristic.write(data, !useWriteWithoutResponse, (error) => {
         if (error) {
+          this.log(`Write error: ${error.message}`);
           reject(error);
         } else {
+          this.log('Write completed successfully');
           resolve();
         }
       });
@@ -657,11 +738,16 @@ class MoesFingerbotAccessory {
 
   // Force disconnect and cleanup
   forceDisconnect() {
+    this.log('Forcing disconnect and cleanup...');
+    
     if (this.currentPeripheral) {
       try {
-        this.currentPeripheral.disconnect();
+        this.log(`Disconnecting from peripheral (state: ${this.currentPeripheral.state})`);
+        if (this.currentPeripheral.state === 'connected' || this.currentPeripheral.state === 'connecting') {
+          this.currentPeripheral.disconnect();
+        }
       } catch (error) {
-        // Ignore disconnect errors
+        this.log(`Disconnect error: ${error.message}`);
       }
       this.currentPeripheral = null;
     }
@@ -670,10 +756,14 @@ class MoesFingerbotAccessory {
     this.deviceAuthenticated = false;
     
     try {
-      noble.stopScanning();
+      if (noble.state === 'poweredOn') {
+        noble.stopScanning();
+      }
       noble.removeAllListeners('discover');
     } catch (error) {
-      // Ignore scanning cleanup errors
+      this.log(`Cleanup error: ${error.message}`);
     }
+    
+    this.log('Cleanup completed');
   }
 }
