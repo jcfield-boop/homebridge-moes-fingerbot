@@ -377,11 +377,12 @@ class MoesFingerbotAccessory {
       throw new Error('Missing BLE address');
     }
 
-    // Configuration
+    // Configuration - adjusted for better stability
     this.pressTime = config.pressTime || 3000;
-    this.scanDuration = config.scanDuration || 10000;
-    this.scanRetries = config.scanRetries || 3;
-    this.connectionTimeout = config.connectionTimeout || 25000;
+    this.scanDuration = config.scanDuration || 15000; // Increased
+    this.scanRetries = config.scanRetries || 2; // Reduced
+    this.connectionTimeout = config.connectionTimeout || 35000; // Increased
+    this.minRssi = config.minRssi || -95; // Minimum signal strength
     
     // Tuya BLE Protocol state
     this.snAck = 0;
@@ -407,6 +408,7 @@ class MoesFingerbotAccessory {
     this.currentPeripheral = null;
     this.bluetoothReady = false;
     this.bleReceiver = new BleReceiver(this);
+    this.operationInProgress = false; // Prevent race conditions
     
     // Detect device model
     this.deviceModel = this.detectDeviceModel();
@@ -431,7 +433,7 @@ class MoesFingerbotAccessory {
     if (noble.state === 'poweredOn') {
       this.bluetoothReady = true;
       this.log('Bluetooth adapter already ready');
-      setTimeout(() => this.updateBatteryLevel(), 5000);
+      // Don't auto-check battery on startup to avoid conflicts
     }
   }
 
@@ -441,7 +443,7 @@ class MoesFingerbotAccessory {
       if (state === 'poweredOn') {
         this.bluetoothReady = true;
         this.log('Bluetooth adapter ready');
-        setTimeout(() => this.updateBatteryLevel(), 5000);
+        // Don't auto-check battery to avoid conflicts
       } else {
         this.bluetoothReady = false;
         this.log('Bluetooth adapter not available');
@@ -450,8 +452,8 @@ class MoesFingerbotAccessory {
     });
 
     noble.on('discover', (peripheral) => {
-      if (peripheral.address === this.address || peripheral.rssi > -70) {
-        this.log(`Discovered device: ${peripheral.address} (${peripheral.advertisement.localName || 'unnamed'}, RSSI: ${peripheral.rssi})`);
+      if (peripheral.address === this.address) {
+        this.log(`Discovered target device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
       }
     });
   }
@@ -516,8 +518,8 @@ class MoesFingerbotAccessory {
     if (!this.bluetoothReady) {
       throw new Error('Bluetooth not ready');
     }
-    if (this.connecting) {
-      throw new Error('Already connecting');
+    if (this.connecting || this.operationInProgress) {
+      throw new Error('Operation already in progress');
     }
     return true;
   }
@@ -525,6 +527,7 @@ class MoesFingerbotAccessory {
   async pressButton() {
     try {
       this.canPerformBLEOperation();
+      this.operationInProgress = true;
       
       this.log('🔴 Activating Fingerbot...');
       const connectionInfo = await this.scanAndConnect();
@@ -534,6 +537,7 @@ class MoesFingerbotAccessory {
       this.log(`❌ Button press failed: ${error.message}`);
       throw error;
     } finally {
+      this.operationInProgress = false;
       this.forceDisconnect();
     }
   }
@@ -541,6 +545,7 @@ class MoesFingerbotAccessory {
   async updateBatteryLevel() {
     try {
       this.canPerformBLEOperation();
+      this.operationInProgress = true;
       
       this.log('🔋 Checking battery level...');
       const connectionInfo = await this.scanAndConnect();
@@ -555,6 +560,7 @@ class MoesFingerbotAccessory {
     } catch (error) {
       this.log(`Battery check failed: ${error.message}`);
     } finally {
+      this.operationInProgress = false;
       this.forceDisconnect();
     }
   }
@@ -574,6 +580,13 @@ class MoesFingerbotAccessory {
         
         const discoverHandler = async (peripheral) => {
           if (peripheral.address === this.address && !peripheralFound) {
+            
+            // Check signal strength
+            if (peripheral.rssi < this.minRssi) {
+              this.log(`⚠️  Device found but signal too weak: ${peripheral.rssi} dBm (min: ${this.minRssi})`);
+              return;
+            }
+            
             peripheralFound = true;
             this.log(`📡 Found target device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
             
@@ -582,6 +595,8 @@ class MoesFingerbotAccessory {
             noble.removeListener('discover', discoverHandler);
 
             try {
+              // Wait a moment before connecting to ensure device is ready
+              await this.delay(1000);
               const connectionInfo = await this.connectToPeripheral(peripheral);
               this.connecting = false;
               resolve(connectionInfo);
@@ -654,38 +669,43 @@ class MoesFingerbotAccessory {
           return reject(error);
         }
 
-        this.log('✅ Connected successfully, discovering services...');
+        this.log('✅ Connected successfully, waiting for stability...');
         
-        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-          clearTimeout(connectionTimeout);
-          peripheral.removeListener('disconnect', disconnectHandler);
+        // Wait longer for connection to stabilize
+        setTimeout(() => {
+          this.log('🔍 Discovering services...');
           
-          if (error) {
-            this.log(`❌ Service discovery error: ${error.message}`);
-            return reject(error);
-          }
+          peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
+            clearTimeout(connectionTimeout);
+            peripheral.removeListener('disconnect', disconnectHandler);
+            
+            if (error) {
+              this.log(`❌ Service discovery error: ${error.message}`);
+              return reject(error);
+            }
 
-          this.log(`📋 Found ${services.length} services and ${characteristics.length} characteristics`);
-          
-          // Find Tuya BLE characteristics
-          const writeChar = characteristics.find(char => char.uuid === '00002b11-0000-1000-8000-00805f9b34fb');
-          const notifyChar = characteristics.find(char => char.uuid === '00002b10-0000-1000-8000-00805f9b34fb');
+            this.log(`📋 Found ${services.length} services and ${characteristics.length} characteristics`);
+            
+            // Find Tuya BLE characteristics
+            const writeChar = characteristics.find(char => char.uuid === '00002b11-0000-1000-8000-00805f9b34fb');
+            const notifyChar = characteristics.find(char => char.uuid === '00002b10-0000-1000-8000-00805f9b34fb');
 
-          if (!writeChar) {
-            this.log('Available characteristics:', characteristics.map(c => c.uuid).join(', '));
-            return reject(new Error('Required write characteristic not found'));
-          }
+            if (!writeChar) {
+              this.log('Available characteristics:', characteristics.map(c => c.uuid).join(', '));
+              return reject(new Error('Required write characteristic not found'));
+            }
 
-          this.log(`✅ Using write characteristic: ${writeChar.uuid}`);
-          if (notifyChar) {
-            this.log(`✅ Using notify characteristic: ${notifyChar.uuid}`);
-          } else {
-            this.log('⚠️  No notify characteristic found');
-            return reject(new Error('Required notify characteristic not found'));
-          }
+            this.log(`✅ Using write characteristic: ${writeChar.uuid}`);
+            if (notifyChar) {
+              this.log(`✅ Using notify characteristic: ${notifyChar.uuid}`);
+            } else {
+              this.log('⚠️  No notify characteristic found');
+              return reject(new Error('Required notify characteristic not found'));
+            }
 
-          resolve({ peripheral, writeChar, notifyChar });
-        });
+            resolve({ peripheral, writeChar, notifyChar });
+          });
+        }, 6000); // Increased wait time for stability
       });
     });
   }
@@ -949,27 +969,33 @@ class MoesFingerbotAccessory {
   forceDisconnect() {
     this.log('🔌 Forcing disconnect and cleanup...');
     
-    if (this.currentPeripheral) {
-      try {
-        if (this.currentPeripheral.state === 'connected') {
-          this.currentPeripheral.disconnect();
-        }
-      } catch (error) {
-        this.log(`Disconnect error: ${error.message}`);
-      }
-      this.currentPeripheral = null;
-    }
-    
-    this.connecting = false;
-    
+    // Stop any ongoing scans first
     try {
       if (noble.state === 'poweredOn') {
         noble.stopScanning();
       }
       noble.removeAllListeners('discover');
     } catch (error) {
-      this.log(`Cleanup error: ${error.message}`);
+      this.log(`Scan cleanup error: ${error.message}`);
     }
+    
+    // Disconnect peripheral
+    if (this.currentPeripheral) {
+      try {
+        this.log(`Disconnecting from peripheral (state: ${this.currentPeripheral.state})`);
+        if (this.currentPeripheral.state === 'connected' || this.currentPeripheral.state === 'connecting') {
+          this.currentPeripheral.disconnect();
+        }
+        this.currentPeripheral.removeAllListeners();
+      } catch (error) {
+        this.log(`Disconnect error: ${error.message}`);
+      }
+      this.currentPeripheral = null;
+    }
+    
+    // Reset state
+    this.connecting = false;
+    this.operationInProgress = false;
     
     this.log('✅ Cleanup completed');
   }
