@@ -13,15 +13,23 @@ class MoesFingerbotAccessory {
   constructor(log, config) {
     this.log = log;
     this.name = config.name || 'MOES Fingerbot';
-    this.address = config.address.toLowerCase();
+    this.address = config.address ? config.address.toLowerCase() : null;
     
     // Required Tuya BLE credentials
     this.deviceId = config.deviceId;
     this.localKey = config.localKey;
     
+    // Debug configuration info
+    this.log(`Configuration: deviceId=${this.deviceId}, address=${this.address}, localKey=${this.localKey ? 'SET' : 'MISSING'}`);
+    
     if (!this.deviceId || !this.localKey) {
       this.log('ERROR: deviceId and localKey are required for Tuya BLE devices');
       throw new Error('Missing required Tuya BLE credentials');
+    }
+
+    if (!this.address) {
+      this.log('ERROR: BLE address is required');
+      throw new Error('Missing BLE address');
     }
 
     // Configuration
@@ -40,10 +48,11 @@ class MoesFingerbotAccessory {
     this.batteryLevel = -1;
     this.connecting = false;
     this.currentPeripheral = null;
+    this.bluetoothReady = false;
     
     // Detect device model
     this.deviceModel = this.detectDeviceModel();
-    this.log(`Detected device model: ${this.deviceModel}`);
+    this.log(`Detected device model: ${this.deviceModel} (deviceId: ${this.deviceId})`);
 
     // Setup HomeKit services
     this.switchService = new Service.Switch(this.name);
@@ -58,17 +67,36 @@ class MoesFingerbotAccessory {
       .on('get', this.getBatteryLevel.bind(this));
 
     // Setup Noble BLE events
+    this.setupBluetoothEvents();
+    
+    // Check initial Bluetooth state
+    if (noble.state === 'poweredOn') {
+      this.bluetoothReady = true;
+      this.log('Bluetooth adapter already ready');
+      // Initial battery check after a short delay
+      setTimeout(() => this.updateBatteryLevel(), 2000);
+    }
+  }
+
+  setupBluetoothEvents() {
     noble.on('stateChange', (state) => {
+      this.log(`Bluetooth state changed to: ${state}`);
       if (state === 'poweredOn') {
+        this.bluetoothReady = true;
         this.log('Bluetooth adapter ready');
+        // Initial battery check when Bluetooth becomes ready
+        setTimeout(() => this.updateBatteryLevel(), 2000);
       } else {
+        this.bluetoothReady = false;
         this.log('Bluetooth adapter not available');
         this.forceDisconnect();
       }
     });
-    
-    // Initial battery check
-    this.updateBatteryLevel();
+
+    noble.on('discover', (peripheral) => {
+      // Log all discovered devices for debugging
+      this.log(`Discovered device: ${peripheral.address} (${peripheral.advertisement.localName || 'unnamed'})`);
+    });
   }
 
   detectDeviceModel() {
@@ -79,11 +107,18 @@ class MoesFingerbotAccessory {
       'cubetouch2': ['xhf790if']
     };
 
+    if (!this.deviceId) {
+      this.log('No deviceId provided for model detection');
+      return 'unknown';
+    }
+
     for (const [model, patterns] of Object.entries(deviceIdPatterns)) {
       if (patterns.some(pattern => this.deviceId.startsWith(pattern))) {
         return model;
       }
     }
+    
+    this.log(`Unknown device pattern for deviceId: ${this.deviceId}`);
     return 'unknown';
   }
 
@@ -122,33 +157,39 @@ class MoesFingerbotAccessory {
     callback(null, level);
   }
 
+  // Check if we can perform BLE operations
+  canPerformBLEOperation() {
+    if (!this.bluetoothReady) {
+      throw new Error('Bluetooth not ready');
+    }
+    if (this.connecting) {
+      throw new Error('Already connecting');
+    }
+    return true;
+  }
+
   // Main entry point for button press
   async pressButton() {
-    return new Promise((resolve, reject) => {
-      if (this.connecting) {
-        return reject(new Error('Already connecting'));
-      }
+    try {
+      this.canPerformBLEOperation();
       
       this.log('Activating Fingerbot...');
-      this.scanAndConnect()
-        .then(peripheral => this.executeButtonPress(peripheral))
-        .then(() => {
-          this.log('Button press completed successfully');
-          resolve();
-        })
-        .catch(error => {
-          this.log(`Button press failed: ${error.message}`);
-          reject(error);
-        })
-        .finally(() => {
-          this.forceDisconnect();
-        });
-    });
+      const peripheral = await this.scanAndConnect();
+      await this.executeButtonPress(peripheral);
+      this.log('Button press completed successfully');
+    } catch (error) {
+      this.log(`Button press failed: ${error.message}`);
+      throw error;
+    } finally {
+      this.forceDisconnect();
+    }
   }
 
   // Battery level update
   async updateBatteryLevel() {
     try {
+      this.canPerformBLEOperation();
+      
       this.log('Checking battery level...');
       const peripheral = await this.scanAndConnect();
       const batteryLevel = await this.readBatteryLevel(peripheral);
@@ -157,6 +198,8 @@ class MoesFingerbotAccessory {
         this.batteryLevel = batteryLevel;
         this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, batteryLevel);
         this.log(`Battery level: ${batteryLevel}%`);
+      } else {
+        this.log('Could not read battery level');
       }
     } catch (error) {
       this.log(`Battery check failed: ${error.message}`);
@@ -180,18 +223,21 @@ class MoesFingerbotAccessory {
         noble.removeAllListeners('discover');
         
         const discoverHandler = async (peripheral) => {
+          this.log(`Checking device: ${peripheral.address} vs ${this.address}`);
+          
           if (peripheral.address === this.address && !peripheralFound) {
             peripheralFound = true;
-            this.log(`Found device: ${peripheral.address}`);
+            this.log(`Found target device: ${peripheral.address}`);
             
             clearTimeout(scanTimeout);
             noble.stopScanning();
             noble.removeListener('discover', discoverHandler);
 
             try {
-              await this.connectToPeripheral(peripheral);
-              resolve(peripheral);
+              const connectionInfo = await this.connectToPeripheral(peripheral);
+              resolve(connectionInfo);
             } catch (error) {
+              this.connecting = false;
               reject(error);
             }
           }
@@ -200,14 +246,26 @@ class MoesFingerbotAccessory {
         noble.on('discover', discoverHandler);
         
         this.log(`Scanning for device (attempt ${retryCount + 1}/${this.scanRetries + 1})...`);
-        noble.startScanning([], true);
+        
+        // Start scanning - allow duplicates to ensure we see advertising devices
+        noble.startScanning([], true, (error) => {
+          if (error) {
+            this.log(`Scan start error: ${error.message}`);
+            this.connecting = false;
+            reject(error);
+            return;
+          }
+          this.log('Bluetooth scanning started');
+        });
 
         scanTimeout = setTimeout(() => {
+          this.log(`Scan timeout reached for attempt ${retryCount + 1}`);
           noble.stopScanning();
           noble.removeListener('discover', discoverHandler);
 
           if (!peripheralFound && retryCount < this.scanRetries) {
             retryCount++;
+            this.log(`Retrying scan in 2 seconds...`);
             setTimeout(startScan, 2000);
           } else if (!peripheralFound) {
             this.connecting = false;
@@ -258,12 +316,19 @@ class MoesFingerbotAccessory {
               return reject(error);
             }
 
+            this.log(`Found ${services.length} services and ${characteristics.length} characteristics`);
+            
+            // Log all characteristics for debugging
+            characteristics.forEach(char => {
+              this.log(`Characteristic: ${char.uuid} (properties: ${char.properties.join(', ')})`);
+            });
+
             // Find required characteristics
             const writeChar = characteristics.find(char => char.uuid === '2b11');
             const notifyChar = characteristics.find(char => char.uuid === '2b10');
 
             if (!writeChar) {
-              return reject(new Error('Write characteristic not found'));
+              return reject(new Error('Write characteristic (2b11) not found'));
             }
 
             this.log('Service discovery completed');
@@ -287,7 +352,7 @@ class MoesFingerbotAccessory {
     await this.authenticateDevice(writeChar);
     
     // Execute press based on device model
-    if (this.deviceModel === 'plus' && this.deviceId.startsWith('blliqpsj')) {
+    if (this.deviceModel === 'plus') {
       await this.executeFingerbotPlusPress(writeChar);
     } else {
       await this.executeGenericPress(writeChar);
@@ -306,6 +371,7 @@ class MoesFingerbotAccessory {
         // Setup notification handler for battery response
         const notificationHandler = (data) => {
           try {
+            this.log(`Received notification data: ${data.toString('hex')}`);
             const parsedData = this.parseTuyaResponse(data);
             if (parsedData && parsedData.command === 0x08) {
               // Status response - look for battery DP (typically DP12)
@@ -331,10 +397,12 @@ class MoesFingerbotAccessory {
         await this.authenticateDevice(writeChar);
         
         // Request device status (includes battery)
-        const statusPacket = this.createTuyaPacket(0x08, Buffer.alloc(0), true);
+        this.log('Requesting device status...');
+        const statusPacket = this.createTuyaPacket(0x08, Buffer.alloc(0), false);
         await this.writeCharacteristic(writeChar, statusPacket);
         
         responseTimeout = setTimeout(() => {
+          this.log('Battery status request timeout');
           if (notifyChar) {
             notifyChar.removeAllListeners('data');
           }
@@ -374,6 +442,7 @@ class MoesFingerbotAccessory {
         this.generateSessionKey();
         
         // Send login packet
+        this.log('Sending authentication packet...');
         const loginPacket = this.createTuyaPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false);
         await this.writeCharacteristic(writeChar, loginPacket);
         
@@ -394,19 +463,13 @@ class MoesFingerbotAccessory {
   async executeFingerbotPlusPress(writeChar) {
     this.log('Executing Fingerbot Plus press sequence...');
     
-    // Set to Click mode
-    const clickModePacket = this.createTuyaPacket(0x06, 
-      Buffer.from([0x02, 0x04, 0x00, 0x04, 0x43, 0x6C, 0x69, 0x63]), true);
-    await this.writeCharacteristic(writeChar, clickModePacket);
-    await this.delay(500);
-    
-    // Trigger press
+    // Trigger press (DP1 = true)
     const pressPacket = this.createTuyaPacket(0x06, 
       Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true);
     await this.writeCharacteristic(writeChar, pressPacket);
     await this.delay(this.pressTime);
     
-    // Release
+    // Release (DP1 = false)
     const releasePacket = this.createTuyaPacket(0x06, 
       Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true);
     await this.writeCharacteristic(writeChar, releasePacket);
@@ -416,7 +479,7 @@ class MoesFingerbotAccessory {
   async executeGenericPress(writeChar) {
     this.log('Executing generic press sequence...');
     
-    const dpId = this.deviceModel === 'plus' ? 0x01 : 0x02;
+    const dpId = 0x01; // Use DP1 for button press
     
     // Press
     const pressPacket = this.createTuyaPacket(0x06, 
@@ -435,8 +498,10 @@ class MoesFingerbotAccessory {
     try {
       let keyBuffer;
       if (this.localKey.length === 32 && /^[0-9a-fA-F]+$/.test(this.localKey)) {
+        // Hex key
         keyBuffer = Buffer.from(this.localKey, 'hex');
       } else {
+        // UTF-8 key, pad to 16 bytes
         keyBuffer = Buffer.from(this.localKey, 'utf8');
         if (keyBuffer.length > 16) {
           keyBuffer = keyBuffer.slice(0, 16);
@@ -447,7 +512,7 @@ class MoesFingerbotAccessory {
         }
       }
       this.sessionKey = keyBuffer;
-      this.log(`Session key generated: ${this.sessionKey.toString('hex')}`);
+      this.log(`Session key generated (${keyBuffer.length} bytes): ${this.sessionKey.toString('hex')}`);
     } catch (error) {
       this.log(`Session key generation failed: ${error.message}`);
       throw error;
@@ -497,25 +562,9 @@ class MoesFingerbotAccessory {
   // Encrypt data using AES-128-ECB
   encryptData(data) {
     try {
-      const timestamp = Math.floor(Date.now() / 1000);
-      const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8').slice(0, 16);
-      const timestampBuffer = Buffer.alloc(4);
-      timestampBuffer.writeUInt32BE(timestamp, 0);
-      
-      // Pad device ID to 16 bytes
-      const paddedDeviceId = Buffer.alloc(16, 0);
-      deviceIdBuffer.copy(paddedDeviceId);
-      
-      const authData = Buffer.concat([paddedDeviceId, timestampBuffer, data]);
-      
-      // PKCS7 padding
-      const paddingNeeded = 16 - (authData.length % 16);
-      const paddedData = Buffer.concat([authData, Buffer.alloc(paddingNeeded, paddingNeeded)]);
-      
       const cipher = crypto.createCipheriv('aes-128-ecb', this.sessionKey, null);
-      cipher.setAutoPadding(false);
-      return Buffer.concat([cipher.update(paddedData), cipher.final()]);
-      
+      cipher.setAutoPadding(true);
+      return Buffer.concat([cipher.update(data), cipher.final()]);
     } catch (error) {
       this.log(`Encryption failed: ${error.message}`);
       throw error;
@@ -552,6 +601,8 @@ class MoesFingerbotAccessory {
 
   // Extract battery level from status payload
   extractBatteryFromStatus(payload) {
+    this.log(`Extracting battery from payload: ${payload.toString('hex')}`);
+    
     // Look for DP12 (battery) or similar battery indicators
     let offset = 0;
     while (offset < payload.length - 4) {
@@ -559,11 +610,19 @@ class MoesFingerbotAccessory {
         const dpId = payload[offset];
         const dpType = payload[offset + 1];
         const dpLength = payload.readUInt16BE(offset + 2);
+        
+        this.log(`Found DP${dpId} type:${dpType} length:${dpLength}`);
+        
+        if (offset + 4 + dpLength > payload.length) {
+          break;
+        }
+        
         const dpData = payload.slice(offset + 4, offset + 4 + dpLength);
         
-        // Battery is typically DP12 with integer type
-        if (dpId === 12 && dpType === 0x02 && dpLength === 4) {
+        // Battery could be DP12, or other DPs - check various possibilities
+        if ((dpId === 12 || dpId === 13 || dpId === 15) && dpType === 0x02 && dpLength === 4) {
           const batteryLevel = dpData.readUInt32BE(0);
+          this.log(`Found potential battery DP${dpId}: ${batteryLevel}`);
           if (batteryLevel >= 0 && batteryLevel <= 100) {
             return batteryLevel;
           }
@@ -571,6 +630,7 @@ class MoesFingerbotAccessory {
         
         offset += 4 + dpLength;
       } catch (error) {
+        this.log(`Error parsing DP at offset ${offset}: ${error.message}`);
         break;
       }
     }
