@@ -346,18 +346,33 @@ class MoesFingerbotAccessory {
             this.log(`Found ${services.length} services and ${characteristics.length} characteristics`);
             
             // Find required characteristics for Tuya BLE
-            const writeChar = characteristics.find(char =>
-              char.uuid.replace(/^0+/, '') === '2b11' ||
-              char.uuid.toLowerCase().includes('2b11') ||
-              (char.properties.includes('write') || char.properties.includes('writeWithoutResponse'))
+            let writeChar = characteristics.find(char =>
+              char.uuid.replace(/^0+/, '') === '2b11'
             );
-            
-            const notifyChar = characteristics.find(char =>
-              char.uuid.replace(/^0+/, '') === '2b10' ||
-              char.uuid.toLowerCase().includes('2b10') ||
-              char.properties.includes('notify') ||
-              char.properties.includes('indicate')
+            if (!writeChar) {
+              writeChar = characteristics.find(char =>
+                char.uuid.toLowerCase().includes('2b11')
+              );
+            }
+            if (!writeChar) {
+              writeChar = characteristics.find(char =>
+                char.properties.includes('write') || char.properties.includes('writeWithoutResponse')
+              );
+            }
+
+            let notifyChar = characteristics.find(char =>
+              char.uuid.replace(/^0+/, '') === '2b10'
             );
+            if (!notifyChar) {
+              notifyChar = characteristics.find(char =>
+                char.uuid.toLowerCase().includes('2b10')
+              );
+            }
+            if (!notifyChar) {
+              notifyChar = characteristics.find(char =>
+                char.properties.includes('notify') || char.properties.includes('indicate')
+              );
+            }
 
             if (!writeChar) {
               this.log('Available characteristics:', characteristics.map(c => `${c.uuid} (${c.properties.join(',')})`).join(', '));
@@ -581,41 +596,133 @@ class MoesFingerbotAccessory {
     });
   }
 
-  // Execute Fingerbot Plus specific press sequence - Fixed
+  // --- 1. AES-128-CBC encryption with IV and PKCS7 padding ---
+  encryptDataCBC(data) {
+    if (!this.sessionKey) {
+      throw new Error('Session key not available for encryption');
+    }
+    // Generate random IV
+    const iv = crypto.randomBytes(16);
+    // PKCS7 padding
+    const padding = 16 - (data.length % 16);
+    const padded = Buffer.concat([data, Buffer.alloc(padding, padding)]);
+    const cipher = crypto.createCipheriv('aes-128-cbc', this.sessionKey, iv);
+    cipher.setAutoPadding(false);
+    const encrypted = Buffer.concat([cipher.update(padded), cipher.final()]);
+    this.log(`Encrypted (CBC) result: ${encrypted.length} bytes, IV: ${iv.toString('hex')}`);
+    return { encrypted, iv };
+  }
+
+  // --- 2. Tuya DP packet builders using DPmarkdown.md schema ---
+  createDPBooleanPacket(dpId, value) {
+    // Boolean: type=1, length=1, value=0x01 or 0x00
+    const buf = Buffer.alloc(6);
+    buf.writeUInt8(dpId, 0); // DP ID
+    buf.writeUInt8(1, 1);    // DP Type (Boolean)
+    buf.writeUInt16BE(1, 2); // Length
+    buf.writeUInt8(value ? 1 : 0, 4); // Value
+    return buf;
+  }
+
+  createDPEnumPacket(dpId, enumValue) {
+    // Enum: type=4, length=1, value=enum index
+    const buf = Buffer.alloc(6);
+    buf.writeUInt8(dpId, 0);
+    buf.writeUInt8(4, 1);
+    buf.writeUInt16BE(1, 2);
+    buf.writeUInt8(enumValue, 4);
+    return buf;
+  }
+
+  createDPIntPacket(dpId, intValue) {
+    // Integer: type=2, length=4, value=UInt32BE
+    const buf = Buffer.alloc(8);
+    buf.writeUInt8(dpId, 0);
+    buf.writeUInt8(2, 1);
+    buf.writeUInt16BE(4, 2);
+    buf.writeUInt32BE(intValue, 4);
+    return buf;
+  }
+
+  // --- 3. Assemble Tuya BLE packet with security flag, IV, and encrypted data ---
+  createTuyaPacket(commandType, dpBuffers = [], encrypt = false) {
+    try {
+      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
+
+      let payload = Buffer.isBuffer(dpBuffers)
+        ? dpBuffers
+        : Buffer.concat(dpBuffers);
+
+      let finalData = payload;
+      let iv = null;
+      let securityFlag = 0x00;
+
+      if (encrypt && this.sessionKey && this.deviceAuthenticated) {
+        // Use CBC encryption with IV
+        const encResult = this.encryptDataCBC(payload);
+        finalData = encResult.encrypted;
+        iv = encResult.iv;
+        securityFlag = 0x05; // Tuya BLE security flag for CBC+IV
+        // Prepend security flag and IV to data
+        finalData = Buffer.concat([Buffer.from([securityFlag]), iv, finalData]);
+      }
+
+      // Tuya BLE packet format:
+      // [0x55AA] [seq(2,BE)] [cmd(1)] [len(2,BE)] [data] [checksum(1)]
+      const packet = Buffer.alloc(8 + finalData.length);
+      let offset = 0;
+
+      // Header
+      packet.writeUInt16BE(0x55AA, offset); offset += 2;
+      // Sequence number
+      packet.writeUInt16BE(this.sequenceNumber, offset); offset += 2;
+      // Command
+      packet.writeUInt8(commandType, offset); offset += 1;
+      // Data length
+      packet.writeUInt16BE(finalData.length, offset); offset += 2;
+      // Data
+      if (finalData.length > 0) {
+        finalData.copy(packet, offset); offset += finalData.length;
+      }
+      // Checksum
+      let checksum = 0;
+      for (let i = 0; i < packet.length - 1; i++) {
+        checksum = (checksum + packet[i]) & 0xFF;
+      }
+      packet.writeUInt8(checksum, offset);
+
+      this.log(`TX: ${packet.toString('hex')}`);
+      return packet;
+    } catch (error) {
+      this.log(`Packet creation failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  // --- 4. Example usage in executeFingerbotPlusPress ---
   async executeFingerbotPlusPress(writeChar) {
     this.log('Executing Fingerbot Plus press sequence...');
-    
     try {
-      // For Fingerbot Plus firmware 2.0, use proper Tuya DP format
-      // DP1 = Switch/Button (boolean)
-      // DP2 = Mode (enum: 0=click, 1=switch, 2=program)
-      // DP3 = Down movement (0-100%)
-      // DP4 = Sustain time (in 100ms units)
-      
-      // First ensure we're in click mode (DP2)
-      this.log('Setting device to click mode...');
-      const modeData = this.createDPPacket(2, 'enum', 0); // Click mode
-      const modePacket = this.createTuyaPacket(0x06, modeData, true);
+      // Set mode to click (DP2, enum 0)
+      const modeDP = this.createDPEnumPacket(2, 0);
+      const modePacket = this.createTuyaPacket(0x06, [modeDP], true);
       await this.writeCharacteristic(writeChar, modePacket);
       await this.delay(500);
-      
-      // Set sustain time (DP4) - convert pressTime to 100ms units
+
+      // Set sustain time (DP4, value, in 100ms units)
       const sustainTime = Math.floor(this.pressTime / 100);
-      this.log(`Setting sustain time to ${sustainTime} (${this.pressTime}ms)...`);
-      const sustainData = this.createDPPacket(4, 'value', sustainTime);
-      const sustainPacket = this.createTuyaPacket(0x06, sustainData, true);
+      const sustainDP = this.createDPIntPacket(4, sustainTime);
+      const sustainPacket = this.createTuyaPacket(0x06, [sustainDP], true);
       await this.writeCharacteristic(writeChar, sustainPacket);
       await this.delay(500);
-      
-      // Trigger press (DP1)
-      this.log('Triggering button press...');
-      const pressData = this.createDPPacket(1, 'bool', true);
-      const pressPacket = this.createTuyaPacket(0x06, pressData, true);
+
+      // Trigger press (DP1, bool true)
+      const pressDP = this.createDPBooleanPacket(1, true);
+      const pressPacket = this.createTuyaPacket(0x06, [pressDP], true);
       await this.writeCharacteristic(writeChar, pressPacket);
-      
+
       // Wait for the device to complete the press cycle
       await this.delay(this.pressTime + 1000);
-      
     } catch (error) {
       this.log(`Fingerbot Plus press failed: ${error.message}`);
       throw error;
@@ -705,61 +812,11 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // Create Tuya BLE packet - Fixed format
-  createTuyaPacket(commandType, data = Buffer.alloc(0), encrypt = false) {
-    try {
-      this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
-      
-      let finalData = data;
-      
-      // Encrypt if required and session key available
-      if (encrypt && this.sessionKey && this.deviceAuthenticated) {
-        finalData = this.encryptData(data);
-      }
-      
-      // Tuya BLE packet format:
-      // [0x55AA] [seq(2,BE)] [cmd(1)] [len(2,BE)] [data] [checksum(1)]
-      const packet = Buffer.alloc(8 + finalData.length);
-      let offset = 0;
-      
-      // Header
-      packet.writeUInt16BE(0x55AA, offset); offset += 2;
-      
-      // Sequence number
-      packet.writeUInt16BE(this.sequenceNumber, offset); offset += 2;
-      
-      // Command
-      packet.writeUInt8(commandType, offset); offset += 1;
-      
-      // Data length
-      packet.writeUInt16BE(finalData.length, offset); offset += 2;
-      
-      // Data
-      if (finalData.length > 0) {
-        finalData.copy(packet, offset); offset += finalData.length;
-      }
-      
-      // Calculate checksum (sum of all bytes except checksum byte)
-      let checksum = 0;
-      for (let i = 0; i < packet.length - 1; i++) {
-        checksum = (checksum + packet[i]) & 0xFF;
-      }
-      packet.writeUInt8(checksum, offset);
-      
-      this.log(`TX: ${packet.toString('hex')}`);
-      return packet;
-      
-    } catch (error) {
-      this.log(`Packet creation failed: ${error.message}`);
-      throw error;
-    }
-  }
-
   // Encrypt data using AES-128-ECB - Fixed
   encryptData(data) {
     try {
       if (!this.sessionKey) {
-        throw new Error('Session key not available for encryption');
+        throw new Error('Session key not available for decryption');
       }
       
       // Pad data to 16-byte boundary using PKCS7
