@@ -335,7 +335,15 @@ class BleReceiver {
         
         dps[dpId] = value;
         
-        // Check for battery level (common DP IDs for battery)
+        // Check for battery level (DP6 according to documentation)
+        if (dpId === 6 && dpType === 2) {
+          if (value >= 0 && value <= 100) {
+            this.accessory.log(`🔋 Found battery level in DP${dpId}: ${value}%`);
+            this.accessory.batteryLevel = value;
+          }
+        }
+        
+        // Also check legacy DP IDs for compatibility
         if ((dpId === 12 || dpId === 13 || dpId === 15 || dpId === 5) && dpType === 2) {
           if (value >= 0 && value <= 100) {
             this.accessory.log(`🔋 Found battery level in DP${dpId}: ${value}%`);
@@ -730,20 +738,43 @@ class MoesFingerbotAccessory {
           }
 
           this.log(`📋 Found ${services.length} services and ${characteristics.length} characteristics`);
+          
+          // Debug: Show all characteristics with full details
+          this.log(`📋 All characteristics:`, characteristics.map(c => ({
+            uuid: c.uuid,
+            shortUuid: c.uuid.replace('00002', '').replace('-0000-1000-8000-00805f9b34fb', ''),
+            properties: c.properties
+          })));
+          
           this.log(`📋 Available characteristics: ${characteristics.map(c => c.uuid.replace('00002', '').replace('-0000-1000-8000-00805f9b34fb', '')).join(', ')}`);
           
-          // Find Tuya BLE characteristics
-          const writeChar = characteristics.find(char => char.uuid === '00002b11-0000-1000-8000-00805f9b34fb');
-          const notifyChar = characteristics.find(char => char.uuid === '00002b10-0000-1000-8000-00805f9b34fb');
+          // Find Tuya BLE characteristics - more robust detection
+          let writeChar = characteristics.find(char => {
+            const uuid = char.uuid.toLowerCase();
+            return uuid === '00002b11-0000-1000-8000-00805f9b34fb' || 
+                   uuid.includes('2b11') ||
+                   uuid === '2b11';
+          });
+          
+          let notifyChar = characteristics.find(char => {
+            const uuid = char.uuid.toLowerCase();
+            return uuid === '00002b10-0000-1000-8000-00805f9b34fb' || 
+                   uuid.includes('2b10') ||
+                   uuid === '2b10';
+          });
+
+          this.log(`🔍 Write char found: ${writeChar ? 'YES' : 'NO'} (${writeChar ? writeChar.uuid : 'none'})`);
+          this.log(`🔍 Notify char found: ${notifyChar ? 'YES' : 'NO'} (${notifyChar ? notifyChar.uuid : 'none'})`);
 
           if (!writeChar) {
             this.log('❌ Required write characteristic 2b11 not found');
+            this.log('📋 Full characteristic list:', characteristics.map(c => ({ uuid: c.uuid, properties: c.properties })));
             return reject(new Error('Required write characteristic not found'));
           }
 
-          this.log(`✅ Using write characteristic: 2b11`);
+          this.log(`✅ Using write characteristic: ${writeChar.uuid}`);
           if (notifyChar) {
-            this.log(`✅ Using notify characteristic: 2b10`);
+            this.log(`✅ Using notify characteristic: ${notifyChar.uuid}`);
             resolve({ peripheral, writeChar, notifyChar });
           } else {
             this.log('❌ Required notify characteristic 2b10 not found');
@@ -908,19 +939,19 @@ class MoesFingerbotAccessory {
     this.sendRequest(writeChar, request);
   }
 
-  // Send fingerbot press DP commands (step 3)
+  // Send fingerbot press DP commands (step 3) - Updated based on DP documentation
   sendFingerbotPress(writeChar) {
     const securityFlag = 5;
     const secretKey = this.secretKeys[securityFlag];
     const iv = TuyaDataPacket.getRandomIV();
     
-    // Create DP commands for fingerbot press
+    // Create DP commands for fingerbot press - corrected mappings
     const dps = [
-      [8, 4, 0],        // Mode = click
-      [9, 2, 80],       // ARM_DOWN_PERCENT
-      [15, 2, 0],       // ARM_UP_PERCENT  
-      [10, 2, Math.floor(this.pressTime / 100)], // CLICK_SUSTAIN_TIME (in 100ms units)
-      [101, 1, true],   // CLICK = true
+      [2, 4, 0],        // mode = "click" (DP2, Enum: 0=click, 1=switch, 2=prog)
+      [3, 2, 80],       // down_percent = 80% (DP3, Integer 51-100)
+      [4, 2, Math.floor(this.pressTime / 1000)], // sustain_time in SECONDS (DP4, Integer 0-10)
+      [7, 2, 0],        // up_percent = 0% (DP7, Integer 0-50)  
+      [1, 1, true],     // switch_1 = true to trigger (DP1, Boolean)
     ];
     
     const inp = this.createDPPayload(dps);
@@ -928,17 +959,21 @@ class MoesFingerbotAccessory {
     const request = new XRequest(snAck, 0, 2, securityFlag, secretKey, iv, inp, this.gattMtu);
     
     this.log('📤 Sending fingerbot press command...');
+    this.log(`   Mode: click, Down: 80%, Sustain: ${Math.floor(this.pressTime / 1000)}s, Up: 0%`);
     this.sendRequest(writeChar, request);
   }
 
-  // Send battery request DP commands
+  // Send battery request DP commands  
   sendBatteryRequest(writeChar) {
     const securityFlag = 5;
     const secretKey = this.secretKeys[securityFlag];
     const iv = TuyaDataPacket.getRandomIV();
     
-    // Request status - empty DP list typically requests all current values
-    const dps = [];
+    // Request specific DPs or empty for all status
+    const dps = [
+      // Request battery_percentage specifically (DP6)
+      // Empty DP array requests all current values
+    ];
     const inp = this.createDPPayload(dps);
     const snAck = this.nextSnAck();
     const request = new XRequest(snAck, 0, 2, securityFlag, secretKey, iv, inp, this.gattMtu);
