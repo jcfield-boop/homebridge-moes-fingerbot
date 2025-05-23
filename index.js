@@ -6,7 +6,7 @@ let Service, Characteristic;
 module.exports = function(homebridge) {
   Service = homebridge.hap.Service;
   Characteristic = homebridge.hap.Characteristic;
-  homebridge.registerAccessory('homebridge-moes-fingerbot-test', 'MoesFingerbotTest', MoesFingerbotTestAccessory);
+  homebridge.registerAccessory('homebridge-moes-fingerbot', 'MoesFingerbot', MoesFingerbotAccessory);
 };
 
 // Simplified CRC16 utility
@@ -132,17 +132,17 @@ class ResponseParser {
   }
 }
 
-class MoesFingerbotTestAccessory {
+class MoesFingerbotAccessory {
   constructor(log, config) {
     this.log = log;
-    this.name = config.name || 'MOES Fingerbot Test';
+    this.name = config.name || 'MOES Fingerbot';
     this.address = config.address ? config.address.toLowerCase() : null;
     
     // Required Tuya BLE credentials
     this.deviceId = config.deviceId;
     this.localKey = config.localKey;
     
-    this.log(`🔧 Test Configuration: deviceId=${this.deviceId}, address=${this.address}, localKey=${this.localKey ? `${this.localKey.length} chars` : 'MISSING'}`);
+    this.log(`🔧 Configuration: deviceId=${this.deviceId}, address=${this.address}, localKey=${this.localKey ? `${this.localKey.length} chars` : 'MISSING'}`);
     
     if (!this.deviceId || !this.localKey || !this.address) {
       this.log('❌ ERROR: deviceId, localKey, and address are all required');
@@ -174,6 +174,7 @@ class MoesFingerbotTestAccessory {
     // Auto-test on startup if Bluetooth is ready
     if (noble.state === 'poweredOn') {
       this.bluetoothReady = true;
+      this.log('Starting automatic communication test in 2 seconds...');
       setTimeout(() => {
         this.testBatteryRead();
       }, 2000);
@@ -214,21 +215,21 @@ class MoesFingerbotTestAccessory {
 
   async testBatteryRead() {
     if (this.operationInProgress) {
-      this.log('⚠️ Operation already in progress');
+      this.log('⚠️ Communication test already in progress');
       return;
     }
 
     try {
       this.operationInProgress = true;
-      this.log('🔋 Starting battery test...');
+      this.log('🔋 Starting battery communication test...');
       
       const connectionInfo = await this.scanAndConnect();
       await this.performSimpleBatteryRead(connectionInfo);
       
-      this.log('✅ Battery test completed');
+      this.log('✅ Battery communication test completed');
       
     } catch (error) {
-      this.log(`❌ Battery test failed: ${error.message}`);
+      this.log(`❌ Battery communication test failed: ${error.message}`);
     } finally {
       this.operationInProgress = false;
       this.forceDisconnect();

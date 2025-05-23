@@ -2,7 +2,7 @@
   "pluginAlias": "homebridge-moes-fingerbot",
   "pluginType": "accessory",
   "singular": false,
-  "headerDisplay": "MOES Fingerbot BLE Test Plugin - Simplified version for testing basic communication",
+  "headerDisplay": "MOES Fingerbot BLE Plugin - Test version for debugging communication issues",
   "footerDisplay": "For support please visit: https://github.com/jcfield-boop/homebridge-moes-fingerbot",
   "schema": {
     "type": "object",
@@ -82,7 +82,7 @@
       "items": [
         {
           "type": "help",
-          "helpvalue": "<h5>How to get Device ID and Local Key:</h5><ol><li>Pair your fingerbot with the Tuya Smart Life app</li><li>Use <a href='https://github.com/tuya-cloudcutter/tuya-cloudcutter'>tuya-cloudcutter</a> or <a href='https://github.com/redphx/tuya-local-key-extractor'>tuya-local-key-extractor</a></li><li>Alternative: Set up Tuya IoT platform account and link your devices</li></ol><h5>How to find BLE Address:</h5><ol><li>On Linux: <code>sudo bluetoothctl</code> then <code>scan on</code></li><li>On macOS: Use Bluetooth Explorer or similar tool</li><li>On Windows: Use Device Manager or PowerShell bluetooth commands</li></ol><h5>Test Purpose:</h5><p>This test version uses simplified BLE communication to verify basic connectivity and debug protocol issues. Check Homebridge logs for detailed communication debugging.</p>"
+          "helpvalue": "<h5>How to get Device ID and Local Key:</h5><ol><li>Pair your fingerbot with the Tuya Smart Life app</li><li>Use <a href='https://github.com/tuya-cloudcutter/tuya-cloudcutter'>tuya-cloudcutter</a> or <a href='https://github.com/redphx/tuya-local-key-extractor'>tuya-local-key-extractor</a></li><li>Alternative: Set up Tuya IoT platform account and link your devices</li></ol><h5>How to find BLE Address:</h5><ol><li>On Linux: <code>sudo bluetoothctl</code> then <code>scan on</code></li><li>On macOS: Use Bluetooth Explorer or similar tool</li><li>On Windows: Use Device Manager or PowerShell bluetooth commands</li></ol><h5>Test Purpose:</h5><p>This version uses simplified BLE communication to verify basic connectivity and debug protocol issues. Check Homebridge logs for detailed communication debugging.</p>"
         }
       ]
     }
