@@ -35,10 +35,16 @@ class MoesFingerbotAccessory {
     
     // DIAGNOSTIC MODE for testing different commands
     this.commandDiagnosticMode = config.commandDiagnosticMode !== false; // default true
+    
+    // NEW: Firmware version detection
+    this.firmwareVersion = config.firmwareVersion || 'auto'; // auto, 1.x, 2.0
+    this.deviceModel = config.deviceModel || 'auto'; // auto, original, plus, cubetouch
 
     // Protocol state - using working format from diagnostic
     this.sequenceNumber = 1;
     this.sessionKey = null;
+    this.deviceAuthenticated = false;
+    this.deviceStatus = {};
 
     // Device state
     this.isOn = false;
@@ -64,12 +70,50 @@ class MoesFingerbotAccessory {
         this.log('Bluetooth adapter is powered on');
         if (this.commandDiagnosticMode) {
           this.log('[COMMAND-DIAG] Diagnostic mode enabled - will test command formats when activated');
+          this.log('[COMMAND-DIAG] Testing for Fingerbot Plus firmware 2.0 compatibility');
         }
       } else {
         this.log('Bluetooth adapter is powered off or unavailable');
         this.forceDisconnect();
       }
     });
+
+    // Detect device model from deviceId patterns
+    this.detectDeviceModel();
+  }
+
+  // Enhanced auto-detect device model with blliqpsj support
+  detectDeviceModel() {
+    const deviceIdPatterns = {
+      'plus': ['blliqpsj', 'ndvkgsrm', 'yiihr7zh', 'neq16kgd'],
+      'original': ['ltak7e1p', 'y6kttvd6', 'yrnk7mnn', 'nvr2rocq', 'bnt7wajf', 'rvdceqjh', '5xhbk964'],
+      'cubetouch1s': ['3yqdo5yt'],
+      'cubetouch2': ['xhf790if']
+    };
+
+    if (this.deviceModel === 'auto') {
+      for (const [model, patterns] of Object.entries(deviceIdPatterns)) {
+        if (patterns.some(pattern => this.deviceId.startsWith(pattern))) {
+          this.deviceModel = model;
+          this.log(`[AUTO-DETECT] Detected device model: ${model}`);
+          
+          // Special logging for blliqpsj (user's confirmed model)
+          if (this.deviceId.startsWith('blliqpsj')) {
+            this.log(`[AUTO-DETECT] Confirmed blliqpsj Fingerbot Plus with full feature set:`);
+            this.log(`[AUTO-DETECT] - Resistance coefficient: 0-2 (0.1 increments)`);
+            this.log(`[AUTO-DETECT] - Movement modes: Click, Switch, Programmable`);
+            this.log(`[AUTO-DETECT] - Down movement: 51%-100%`);
+            this.log(`[AUTO-DETECT] - Sustain time: 0-10 seconds`);
+            this.log(`[AUTO-DETECT] - Calibration & Programming functions available`);
+          }
+          break;
+        }
+      }
+      if (this.deviceModel === 'auto') {
+        this.deviceModel = 'unknown';
+        this.log(`[AUTO-DETECT] Unknown device model, using fallback mode`);
+      }
+    }
   }
 
   getServices() {
@@ -128,6 +172,7 @@ class MoesFingerbotAccessory {
       this.currentPeripheral = null;
     }
     this.connecting = false;
+    this.deviceAuthenticated = false;
     
     // Also try to stop any ongoing scanning to prevent conflicts
     try {
@@ -138,7 +183,7 @@ class MoesFingerbotAccessory {
     noble.removeAllListeners('discover');
   }
 
-  // Generate session key (for potential future use)
+  // Enhanced session key generation for firmware 2.0
   generateSessionKey() {
     if (!this.localKey) return null;
 
@@ -165,8 +210,8 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // WORKING PACKET FORMAT - with proper Tuya BLE encryption
-  createTuyaBLEPacket(commandType, data = Buffer.alloc(0), encrypt = false) {
+  // ENHANCED packet format with firmware 2.0 support
+  createTuyaBLEPacket(commandType, data = Buffer.alloc(0), encrypt = false, useV2Protocol = false) {
     try {
       this.sequenceNumber = (this.sequenceNumber + 1) & 0xFFFF;
       
@@ -178,28 +223,18 @@ class MoesFingerbotAccessory {
       
       let finalData = data;
       
-      // Encrypt data if requested and we have session key
-      if (encrypt && this.sessionKey && (commandType === 0x06 || commandType === 0x07)) {
+      // Enhanced encryption for firmware 2.0
+      if (encrypt && this.sessionKey && (commandType === 0x06 || commandType === 0x07 || commandType === 0x08)) {
         try {
-          // Create proper Tuya BLE encrypted payload
-          const timestamp = Math.floor(Date.now() / 1000);
-          const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
+          if (useV2Protocol || this.firmwareVersion === '2.0' || this.deviceModel === 'plus') {
+            // Firmware 2.0 encryption approach
+            finalData = this.encryptDataV2(data);
+          } else {
+            // Original encryption approach
+            finalData = this.encryptDataV1(data);
+          }
           
-          // Build authenticated data: deviceId + timestamp + command data
-          const timestampBuffer = Buffer.alloc(4);
-          timestampBuffer.writeUInt32BE(timestamp, 0);
-          const authData = Buffer.concat([deviceIdBuffer, timestampBuffer, data]);
-          
-          // Pad to 16-byte boundary for AES
-          const paddingNeeded = 16 - (authData.length % 16);
-          const paddedData = Buffer.concat([authData, Buffer.alloc(paddingNeeded, paddingNeeded)]);
-          
-          // Encrypt with AES-128-ECB
-          const cipher = crypto.createCipher('aes-128-ecb', this.sessionKey);
-          cipher.setAutoPadding(false);
-          finalData = Buffer.concat([cipher.update(paddedData), cipher.final()]);
-          
-          this.log(`[DEBUG] Encrypted payload (${finalData.length} bytes): ${finalData.toString('hex')}`);
+          this.log(`[DEBUG] Encrypted payload (v${useV2Protocol ? '2' : '1'}, ${finalData.length} bytes): ${finalData.toString('hex')}`);
         } catch (encError) {
           this.log(`[DEBUG] Encryption failed: ${encError}, using raw data`);
           finalData = data;
@@ -218,7 +253,7 @@ class MoesFingerbotAccessory {
       }
       
       const packet = Buffer.concat([header, payload, Buffer.from([checksum])]);
-      this.log(`[DEBUG] Tuya BLE packet (cmd 0x${commandType.toString(16)}, encrypted: ${encrypt}): ${packet.toString('hex')}`);
+      this.log(`[DEBUG] Tuya BLE packet (cmd 0x${commandType.toString(16)}, encrypted: ${encrypt}, v2: ${useV2Protocol}): ${packet.toString('hex')}`);
       return packet;
       
     } catch (error) {
@@ -227,79 +262,344 @@ class MoesFingerbotAccessory {
     }
   }
 
-  // COMMAND DIAGNOSTIC: Test encrypted and authenticated approaches
+  // Original encryption method
+  encryptDataV1(data) {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
+    
+    const timestampBuffer = Buffer.alloc(4);
+    timestampBuffer.writeUInt32BE(timestamp, 0);
+    const authData = Buffer.concat([deviceIdBuffer, timestampBuffer, data]);
+    
+    const paddingNeeded = 16 - (authData.length % 16);
+    const paddedData = Buffer.concat([authData, Buffer.alloc(paddingNeeded, paddingNeeded)]);
+    
+    const cipher = crypto.createCipher('aes-128-ecb', this.sessionKey);
+    cipher.setAutoPadding(false);
+    return Buffer.concat([cipher.update(paddedData), cipher.final()]);
+  }
+
+  // Enhanced encryption for firmware 2.0
+  encryptDataV2(data) {
+    const timestamp = Math.floor(Date.now() / 1000);
+    
+    // For firmware 2.0, use different auth data structure
+    const deviceIdTruncated = Buffer.from(this.deviceId, 'utf8').slice(0, 16);
+    const timestampBuffer = Buffer.alloc(4);
+    timestampBuffer.writeUInt32BE(timestamp, 0);
+    
+    // Pad device ID to 16 bytes
+    const paddedDeviceId = Buffer.alloc(16, 0);
+    deviceIdTruncated.copy(paddedDeviceId);
+    
+    const authData = Buffer.concat([paddedDeviceId, timestampBuffer, data]);
+    
+    // Try AES-128-CBC with zero IV for firmware 2.0
+    const iv = Buffer.alloc(16, 0);
+    const cipher = crypto.createCipheriv('aes-128-cbc', this.sessionKey, iv);
+    return Buffer.concat([cipher.update(authData), cipher.final()]);
+  }
+
+  // Enhanced device response parsing
+  parseDeviceResponse(data) {
+    if (data.length < 7) {
+      this.log(`[ENHANCED-DIAG] Response too short: ${data.length} bytes`);
+      return;
+    }
+    
+    try {
+      const header = data.slice(0, 2);
+      const sequence = data.readUInt16BE(2);
+      const command = data[4];
+      const length = data.readUInt16BE(5);
+      const payload = data.slice(7, 7 + length);
+      const checksum = data[7 + length];
+      
+      this.log(`[ENHANCED-DIAG] Parsed response:`);
+      this.log(`  Header: ${header.toString('hex')}`);
+      this.log(`  Sequence: ${sequence}`);
+      this.log(`  Command: 0x${command.toString(16)}`);
+      this.log(`  Length: ${length}`);
+      this.log(`  Payload: ${payload.toString('hex')}`);
+      this.log(`  Checksum: 0x${checksum.toString(16)}`);
+      
+      // Decode specific responses
+      switch (command) {
+        case 0x01:
+          this.handleLoginResponse(payload);
+          break;
+        case 0x02:
+          this.log(`[ENHANCED-DIAG] Heartbeat response received`);
+          break;
+        case 0x06:
+          this.handleDPResponse(payload);
+          break;
+        case 0x08:
+          this.handleStatusResponse(payload);
+          break;
+        default:
+          this.log(`[ENHANCED-DIAG] Unknown command response: 0x${command.toString(16)}`);
+      }
+    } catch (parseError) {
+      this.log(`[ENHANCED-DIAG] Error parsing response: ${parseError}`);
+    }
+  }
+
+  handleLoginResponse(payload) {
+    this.log(`[ENHANCED-DIAG] Login response - Status: ${payload.length > 0 ? payload[0] : 'unknown'}`);
+    if (payload.length > 0 && payload[0] === 0x00) {
+      this.log(`[ENHANCED-DIAG] ✓ Login successful - device authenticated`);
+      this.deviceAuthenticated = true;
+    } else {
+      this.log(`[ENHANCED-DIAG] ✗ Login failed - status code: ${payload[0]}`);
+      this.deviceAuthenticated = false;
+    }
+  }
+
+  handleDPResponse(payload) {
+    this.log(`[ENHANCED-DIAG] DP command response`);
+    if (payload.length >= 4) {
+      const dpId = payload[0];
+      const dpType = payload[1];
+      const dpValue = payload.slice(4);
+      this.log(`  DP${dpId} (type ${dpType}): ${dpValue.toString('hex')}`);
+      
+      // Store DP status
+      this.deviceStatus[`dp${dpId}`] = {
+        type: dpType,
+        value: dpValue
+      };
+    }
+  }
+
+  handleStatusResponse(payload) {
+    this.log(`[ENHANCED-DIAG] Device status response`);
+    if (payload.length === 0) {
+      this.log(`[ENHANCED-DIAG] Empty status payload`);
+      return;
+    }
+    
+    // Parse DP status responses
+    let offset = 0;
+    while (offset < payload.length - 4) {
+      try {
+        const dpId = payload[offset];
+        const dpType = payload[offset + 1];
+        const dpLength = payload.readUInt16BE(offset + 2);
+        const dpData = payload.slice(offset + 4, offset + 4 + dpLength);
+        
+        this.log(`[ENHANCED-DIAG] Status DP${dpId} (type ${dpType}, len ${dpLength}): ${dpData.toString('hex')}`);
+        
+        // Decode common DP types
+        if (dpType === 0x01 && dpLength === 1) { // Boolean
+          const boolValue = dpData[0] === 0x01;
+          this.log(`  Boolean value: ${boolValue}`);
+          this.deviceStatus[`dp${dpId}`] = boolValue;
+        } else if (dpType === 0x02 && dpLength === 4) { // Integer
+          const intValue = dpData.readUInt32BE(0);
+          this.log(`  Integer value: ${intValue}`);
+          this.deviceStatus[`dp${dpId}`] = intValue;
+        }
+        
+        offset += 4 + dpLength;
+      } catch (parseError) {
+        this.log(`[ENHANCED-DIAG] Error parsing DP at offset ${offset}: ${parseError}`);
+        break;
+      }
+    }
+  }
+
+  // ENHANCED COMMAND DIAGNOSTIC: Targeted for blliqpsj Fingerbot Plus
   getCommandTestConfigurations() {
-    return [
+    const baseConfigs = [
+      // Test 1: Main trigger DP1 (most likely for Click mode)
       {
-        name: "Basic DP2 BOOL (no encryption)",
+        name: "DP1 Main Trigger (Click Mode)",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 = true
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 2: Mode setting + trigger (Switch to Click mode then trigger)
+      {
+        name: "Set Click Mode + Trigger",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x04, 0x43, 0x6C, 0x69, 0x63]), true, true), // DP2 = "Clic" (Click mode)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 trigger
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 3: Switch mode test
+      {
+        name: "Switch Mode Toggle",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x06, 0x53, 0x77, 0x69, 0x74, 0x63, 0x68]), true, true), // DP2 = "Switch"
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 trigger
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 4: Resistance coefficient setting (DP3 likely)
+      {
+        name: "Set Resistance + Trigger",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x03, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0A]), true, true), // DP3 = 10 (1.0 resistance)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 trigger
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 5: Down movement percentage (DP4 likely)
+      {
+        name: "Set Down Movement + Trigger",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x04, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x50]), true, true), // DP4 = 80 (80% down movement)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 trigger
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 6: Sustain time (DP5 likely)
+      {
+        name: "Set Sustain Time + Trigger",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x05, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x1E]), true, true), // DP5 = 30 (3 seconds)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 trigger
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 7: Programming mode activation
+      {
+        name: "Programming Mode Test",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x0C, 0x50, 0x72, 0x6F, 0x67, 0x72, 0x61, 0x6D, 0x6D, 0x61, 0x62, 0x6C, 0x65]), true, true), // DP2 = "Programmable"
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x65, 0x01, 0x00, 0x01, 0x01]), true, true), // DP101 execute program
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 8: Calibration command (DP6 likely)
+      {
+        name: "Calibration Command",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x06, 0x01, 0x00, 0x01, 0x01]), true, true), // DP6 = calibrate
+        ],
+        delay: 5000 // Calibration might take longer
+      },
+
+      // Test 9: Adaptive movement setting
+      {
+        name: "Adaptive Movement + Trigger",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x07, 0x01, 0x00, 0x01, 0x01]), true, true), // DP7 = adaptive movement on
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 trigger
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 10: Complete setup sequence
+      {
+        name: "Complete Setup + Click Mode",
+        commands: [
+          () => {
+            this.log('[COMMAND-DIAG] Setting up Click mode...');
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x04, 0x43, 0x6C, 0x69, 0x63]), true, true); // Click mode
+          },
+          () => {
+            this.log('[COMMAND-DIAG] Setting resistance...');
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x03, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0A]), true, true); // Resistance 1.0
+          },
+          () => {
+            this.log('[COMMAND-DIAG] Setting down movement...');
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x04, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x50]), true, true); // 80% down
+          },
+          () => {
+            this.log('[COMMAND-DIAG] Triggering action...');
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true); // Trigger
+          }
+        ],
+        delay: this.pressTime
+      },
+
+      // Test 11: Auth sequence + Status query + Action
+      {
+        name: "Full Auth + Status + Action",
+        commands: [
+          () => {
+            this.log('[COMMAND-DIAG] Authenticating...');
+            return this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false);
+          },
+          () => {
+            this.log('[COMMAND-DIAG] Heartbeat...');
+            const timestamp = Math.floor(Date.now() / 1000);
+            const timestampBuffer = Buffer.alloc(4);
+            timestampBuffer.writeUInt32BE(timestamp, 0);
+            return this.createTuyaBLEPacket(0x02, timestampBuffer, false);
+          },
+          () => {
+            this.log('[COMMAND-DIAG] Querying status...');
+            return this.createTuyaBLEPacket(0x08, Buffer.alloc(0), true, true);
+          },
+          () => {
+            this.log('[COMMAND-DIAG] Triggering...');
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true);
+          }
+        ],
+        delay: this.pressTime
+      },
+
+      // Original working commands for compatibility
+      {
+        name: "Original DP2 BOOL (firmware 1.x compat)",
         commands: [
           () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), false), // DP2 = true
           () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), false)  // DP2 = false
         ],
         delay: this.pressTime
       },
+
       {
-        name: "ENCRYPTED DP2 BOOL (with auth)",
+        name: "ENCRYPTED DP2 BOOL (v1 encryption)",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true), // DP2 = true (encrypted)
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true)  // DP2 = false (encrypted)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true, false), // DP2 = true (v1)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true, false)  // DP2 = false (v1)
         ],
         delay: this.pressTime
       },
+
       {
-        name: "Full Auth + Encrypted DP1",
+        name: "ENCRYPTED DP1 BOOL (v2 encryption)",
         commands: [
-          () => this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false), // Login
-          () => {
-            // Heartbeat with timestamp
-            const timestamp = Math.floor(Date.now() / 1000);
-            const timestampBuffer = Buffer.alloc(4);
-            timestampBuffer.writeUInt32BE(timestamp, 0);
-            return this.createTuyaBLEPacket(0x02, timestampBuffer, false);
-          },
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true), // Encrypted DP1 = true
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true)  // Encrypted DP1 = false
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 = true (v2)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true, true)  // DP1 = false (v2)
         ],
         delay: this.pressTime
       },
+
       {
-        name: "ENCRYPTED DP2 BOOL",
+        name: "Query All DPs (status check)",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true), // DP2 = true (encrypted)
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true)  // DP2 = false (encrypted)
-        ],
-        delay: this.pressTime
-      },
-      {
-        name: "ENCRYPTED DP1 INTEGER",
-        commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01]), true), // DP1 = 1 (encrypted)
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]), true)  // DP1 = 0 (encrypted)
-        ],
-        delay: this.pressTime
-      },
-      {
-        name: "Single ENCRYPTED DP1 press",
-        commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true) // Just DP1 = true (encrypted)
+          () => this.createTuyaBLEPacket(0x08, Buffer.alloc(0), true, true), // Query all DPs
         ],
         delay: 1000
-      },
-      {
-        name: "Command 0x07 with ENCRYPTED DP query",
-        commands: [
-          () => this.createTuyaBLEPacket(0x07, Buffer.from([0x01]), true) // Query DP1 (encrypted)
-        ],
-        delay: 500
-      },
-      {
-        name: "Raw 0x04 command ENCRYPTED",
-        commands: [
-          () => this.createTuyaBLEPacket(0x04, Buffer.from([0x01]), true) // Raw command (encrypted)
-        ],
-        delay: 500
       }
     ];
+
+    // Add model-specific tests
+    if (this.deviceModel === 'plus') {
+      baseConfigs.unshift({
+        name: "Fingerbot Plus Manual Trigger DP",
+        commands: [
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x04, 0x01, 0x00, 0x01, 0x01]), true, true), // DP4 manual trigger
+        ],
+        delay: this.pressTime
+      });
+    }
+
+    return baseConfigs;
   }
 
   async pressButton() {
@@ -312,7 +612,7 @@ class MoesFingerbotAccessory {
 
   async pressButtonDiagnostic() {
     return new Promise((resolve, reject) => {
-      this.log('[COMMAND-DIAG] Starting command diagnostic to find working Fingerbot commands...');
+      this.log(`[COMMAND-DIAG] Starting enhanced diagnostic for ${this.deviceModel} device (firmware ${this.firmwareVersion})`);
       this.forceDisconnect();
 
       const testConfigs = this.getCommandTestConfigurations();
@@ -320,8 +620,9 @@ class MoesFingerbotAccessory {
 
       const runNextCommandTest = () => {
         if (testIndex >= testConfigs.length) {
-          this.log(`[COMMAND-DIAG] All command tests completed! Check if any made the Fingerbot move.`);
-          this.log(`[COMMAND-DIAG] If you saw movement, note which test number worked and we'll use that format.`);
+          this.log(`[COMMAND-DIAG] All ${testConfigs.length} command tests completed!`);
+          this.log(`[COMMAND-DIAG] Check device status: ${JSON.stringify(this.deviceStatus)}`);
+          this.log(`[COMMAND-DIAG] If you saw movement, note which test number worked.`);
           resolve();
           return;
         }
@@ -341,7 +642,7 @@ class MoesFingerbotAccessory {
               this.log(`[COMMAND-DIAG] Test "${config.name}" failed: ${error.message}`);
               setTimeout(runNextCommandTest, 2000);
             });
-        }, 2000); // 2 second warning delay
+        }, 2000);
       };
 
       runNextCommandTest();
@@ -350,7 +651,7 @@ class MoesFingerbotAccessory {
 
   async pressButtonStandard() {
     return new Promise((resolve, reject) => {
-      this.log('Scanning for Fingerbot...');
+      this.log(`Scanning for ${this.deviceModel} Fingerbot...`);
 
       this.forceDisconnect();
 
@@ -462,7 +763,7 @@ class MoesFingerbotAccessory {
         if (!peripheralFound) {
           reject(new Error('Device not found during command test'));
         }
-      }, 4000); // Quick scan for command tests
+      }, 5000); // Slightly longer scan for command tests
     });
   }
 
@@ -531,7 +832,7 @@ class MoesFingerbotAccessory {
       cleanup();
       this.forceDisconnect();
       reject(new Error('Connection timeout'));
-    }, 15000); // Longer timeout
+    }, 15000);
 
     peripheral.connect((error) => {
       if (error) {
@@ -543,7 +844,6 @@ class MoesFingerbotAccessory {
 
       this.log('[DEBUG] Connected, waiting before service discovery...');
       
-      // Wait longer before service discovery to let connection stabilize
       setTimeout(() => {
         if (peripheral.state !== 'connected') {
           cleanup();
@@ -582,7 +882,6 @@ class MoesFingerbotAccessory {
             this.log(`[DEBUG] Using notify characteristic: ${notifyChar.uuid}`);
           }
 
-          // Clear connection timeout, set service timeout
           clearTimeout(connectionTimeout);
           connectionTimeout = null;
           
@@ -591,7 +890,7 @@ class MoesFingerbotAccessory {
             cleanup();
             this.forceDisconnect();
             reject(new Error('Service operation timeout'));
-          }, 10000);
+          }, 12000);
 
           if (testConfig) {
             this.executeTestSequence(writeChar, notifyChar, peripheral, testConfig, cleanup, resolve, reject);
@@ -599,15 +898,34 @@ class MoesFingerbotAccessory {
             this.executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject);
           }
         });
-      }, 2000); // Wait 2 seconds after connection before service discovery
+      }, 2000);
+    });
+  }
+
+  // Enhanced notification setup
+  setupEnhancedNotifications(notifyChar) {
+    if (!notifyChar) return;
+    
+    notifyChar.subscribe((error) => {
+      if (error) {
+        this.log(`[ENHANCED-DIAG] Notification subscription error: ${error}`);
+      } else {
+        this.log('[ENHANCED-DIAG] Subscribed to notifications');
+        
+        notifyChar.on('data', (data) => {
+          this.log(`[ENHANCED-DIAG] Raw response: ${data.toString('hex')}`);
+          this.parseDeviceResponse(data);
+        });
+      }
     });
   }
 
   executeTestSequence(writeChar, notifyChar, peripheral, testConfig, cleanup, resolve, reject) {
     this.log(`[COMMAND-DIAG] Executing test: ${testConfig.name}`);
     
-    // Generate session key for encryption before starting
+    // Generate session key and setup enhanced notifications
     this.generateSessionKey();
+    this.setupEnhancedNotifications(notifyChar);
     
     let operationTimeout = null;
     let sequenceComplete = false;
@@ -617,43 +935,15 @@ class MoesFingerbotAccessory {
         this.log('[COMMAND-DIAG] Test operation timeout');
         cleanup();
         this.forceDisconnect();
-        resolve(); // Don't reject, just complete the test
+        resolve();
       }
-    }, 10000); // Longer timeout for encrypted commands
+    }, 12000);
 
-    // Set up notifications to see if device responds
-    if (notifyChar) {
-      notifyChar.subscribe((error) => {
-        if (error) {
-          this.log(`[COMMAND-DIAG] Notification subscription error: ${error}`);
-        } else {
-          this.log('[COMMAND-DIAG] Subscribed to notifications');
-          
-          notifyChar.on('data', (data) => {
-            this.log(`[COMMAND-DIAG] Device response: ${data.toString('hex')}`);
-            // Parse response for authentication status
-            if (data.length >= 7) {
-              const cmdType = data[6];
-              if (cmdType === 0x01) {
-                this.log(`[COMMAND-DIAG] Login response received - device may be authenticated`);
-              } else if (cmdType === 0x02) {
-                this.log(`[COMMAND-DIAG] Heartbeat response received`);
-              } else if (cmdType === 0x06) {
-                this.log(`[COMMAND-DIAG] DP command response received - device acknowledged command`);
-              }
-            }
-          });
-        }
-      });
-    }
-
-    // Execute the test command sequence
     const executeTest = () => {
       let commandIndex = 0;
       
       const sendNextCommand = () => {
         if (commandIndex >= testConfig.commands.length) {
-          // Test completed
           sequenceComplete = true;
           clearTimeout(operationTimeout);
           cleanup();
@@ -679,14 +969,13 @@ class MoesFingerbotAccessory {
               this.log(`[COMMAND-DIAG] Command ${commandIndex} sent successfully`);
             }
 
-            // Wait before next command - longer for auth commands
-            let delay = 300;
+            let delay = 500;
             if (commandIndex === 1 && testConfig.name.includes("Auth")) {
-              delay = 1000; // Wait longer after login
+              delay = 1500; // Wait longer after login
             } else if (commandIndex === 2 && testConfig.name.includes("Auth")) {
-              delay = 500; // Wait after heartbeat
+              delay = 1000; // Wait after heartbeat
             } else if (commandIndex >= testConfig.commands.length) {
-              delay = testConfig.delay; // Final delay
+              delay = testConfig.delay;
             }
             
             setTimeout(sendNextCommand, delay);
@@ -699,7 +988,6 @@ class MoesFingerbotAccessory {
       sendNextCommand();
     };
 
-    // Start the test sequence with a longer delay for encryption setup
     setTimeout(executeTest, 1000);
   }
 
@@ -711,10 +999,8 @@ class MoesFingerbotAccessory {
         return reject(new Error('Already connecting'));
       }
 
-      // Always force disconnect first to ensure clean state
       this.forceDisconnect();
       
-      // Wait a moment for cleanup to complete
       setTimeout(() => {
         this.doConnection(peripheral, resolve, reject);
       }, 1000);
@@ -722,10 +1008,10 @@ class MoesFingerbotAccessory {
   }
 
   executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
-    this.log('[DEBUG] Executing WORKING Fingerbot sequence...');
+    this.log(`[DEBUG] Executing WORKING ${this.deviceModel} Fingerbot sequence (model: ${this.deviceId.substring(0,8)})...`);
     
-    // Generate session key for potential encryption
     this.generateSessionKey();
+    this.setupEnhancedNotifications(notifyChar);
     
     let operationTimeout = null;
     let sequenceComplete = false;
@@ -737,97 +1023,108 @@ class MoesFingerbotAccessory {
         this.forceDisconnect();
         reject(new Error('Operation timeout'));
       }
-    }, 8000);
+    }, 12000);
 
-    // Set up notifications for status/battery updates
-    if (notifyChar) {
-      notifyChar.subscribe((error) => {
-        if (error) {
-          this.log(`[DEBUG] Notification subscription error: ${error}`);
-        } else {
-          this.log('[DEBUG] Subscribed to notifications');
-          
-          notifyChar.on('data', (data) => {
-            this.log(`[DEBUG] Notification: ${data.toString('hex')}`);
-          });
-        }
-      });
-    }
-
-    // Execute the working press+release sequence (try encrypted first, then fallback)
     const executeSequence = () => {
-      // Try encrypted commands first since device works with Tuya app
-      const pressPacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true);
-      const releasePacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true);
+      // For blliqpsj Fingerbot Plus, use specific DP mappings based on app exploration
+      const isBlliqpsj = this.deviceId.startsWith('blliqpsj');
+      const useV2 = true; // Always use v2 for Plus models
       
-      // Fallback to unencrypted
-      const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), false);
-      const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), false);
-
-      if (!pressPacketEncrypted || !releasePacketEncrypted) {
-        sequenceComplete = true;
-        clearTimeout(operationTimeout);
-        cleanup();
-        this.forceDisconnect();
-        return reject(new Error('Failed to create encrypted command packets'));
-      }
-
-      this.log('[DEBUG] Sending ENCRYPTED press command...');
-      writeChar.write(pressPacketEncrypted, true, (error) => {
-        if (error) {
-          this.log(`[DEBUG] Encrypted press command error: ${error}`);
-          // Fallback to unencrypted
-          this.log('[DEBUG] Trying unencrypted press command...');
-          writeChar.write(pressPacket, true, (fallbackError) => {
-            if (fallbackError) {
-              this.log(`[DEBUG] Unencrypted press also failed: ${fallbackError}`);
-            } else {
-              this.log('[DEBUG] Unencrypted press command sent successfully');
-            }
-          });
-        } else {
-          this.log('[DEBUG] Encrypted press command sent successfully');
-        }
-
-        // Wait for press duration, then send release
-        setTimeout(() => {
-          if (sequenceComplete || peripheral.state !== 'connected') {
-            return; // Already completed or disconnected
+      if (isBlliqpsj) {
+        // Sequence for blliqpsj Fingerbot Plus
+        this.log('[DEBUG] Using blliqpsj Fingerbot Plus sequence...');
+        
+        // Step 1: Set Click mode
+        const setClickMode = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x04, 0x43, 0x6C, 0x69, 0x63]), true, true);
+        
+        this.log('[DEBUG] Setting Click mode...');
+        writeChar.write(setClickMode, true, (error) => {
+          if (error) {
+            this.log(`[DEBUG] Click mode setting error: ${error}`);
+          } else {
+            this.log('[DEBUG] Click mode set successfully');
           }
 
-          this.log('[DEBUG] Sending ENCRYPTED release command...');
-          writeChar.write(releasePacketEncrypted, true, (error) => {
-            if (error) {
-              this.log(`[DEBUG] Encrypted release command error: ${error}`);
-              // Fallback to unencrypted
-              this.log('[DEBUG] Trying unencrypted release command...');
-              writeChar.write(releasePacket, true, (fallbackError) => {
-                if (fallbackError) {
-                  this.log(`[DEBUG] Unencrypted release also failed: ${fallbackError}`);
-                } else {
-                  this.log('[DEBUG] Unencrypted release command sent successfully');
-                }
-              });
-            } else {
-              this.log('[DEBUG] Encrypted release command sent successfully');
-            }
+          // Step 2: Wait then trigger action
+          setTimeout(() => {
+            if (sequenceComplete || peripheral.state !== 'connected') return;
 
-            // Complete the operation
-            sequenceComplete = true;
-            clearTimeout(operationTimeout);
-            cleanup();
+            const triggerAction = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true);
             
-            setTimeout(() => {
-              this.forceDisconnect();
-              this.log('[DEBUG] Fingerbot operation completed successfully!');
-              resolve();
-            }, 500); // Brief delay before disconnect
-          });
-        }, this.pressTime);
-      };
+            this.log('[DEBUG] Triggering Fingerbot action...');
+            writeChar.write(triggerAction, true, (error) => {
+              if (error) {
+                this.log(`[DEBUG] Trigger command error: ${error}`);
+              } else {
+                this.log('[DEBUG] Trigger command sent successfully');
+              }
+
+              // Complete the operation
+              sequenceComplete = true;
+              clearTimeout(operationTimeout);
+              cleanup();
+              
+              setTimeout(() => {
+                this.forceDisconnect();
+                this.log('[DEBUG] blliqpsj Fingerbot Plus operation completed successfully!');
+                resolve();
+              }, 1000);
+            });
+          }, 1000); // Wait 1 second between mode setting and trigger
+        });
+        
+      } else {
+        // Fallback for other Plus models or unknown variants
+        this.log('[DEBUG] Using fallback Plus sequence...');
+        
+        const pressDP = this.deviceModel === 'plus' ? [0x01, 0x01, 0x00, 0x01, 0x01] : [0x02, 0x01, 0x00, 0x01, 0x01];
+        const releaseDP = this.deviceModel === 'plus' ? [0x01, 0x01, 0x00, 0x01, 0x00] : [0x02, 0x01, 0x00, 0x01, 0x00];
+
+        const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from(pressDP), true, useV2);
+        const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from(releaseDP), true, useV2);
+
+        if (!pressPacket || !releasePacket) {
+          sequenceComplete = true;
+          clearTimeout(operationTimeout);
+          cleanup();
+          this.forceDisconnect();
+          return reject(new Error('Failed to create command packets'));
+        }
+
+        this.log(`[DEBUG] Sending fallback press command...`);
+        writeChar.write(pressPacket, true, (error) => {
+          if (error) {
+            this.log(`[DEBUG] Press command error: ${error}`);
+          } else {
+            this.log('[DEBUG] Press command sent successfully');
+          }
+
+          setTimeout(() => {
+            if (sequenceComplete || peripheral.state !== 'connected') return;
+
+            this.log(`[DEBUG] Sending fallback release command...`);
+            writeChar.write(releasePacket, true, (error) => {
+              if (error) {
+                this.log(`[DEBUG] Release command error: ${error}`);
+              } else {
+                this.log('[DEBUG] Release command sent successfully');
+              }
+
+              sequenceComplete = true;
+              clearTimeout(operationTimeout);
+              cleanup();
+              
+              setTimeout(() => {
+                this.forceDisconnect();
+                this.log(`[DEBUG] Fallback Fingerbot operation completed!`);
+                resolve();
+              }, 500);
+            });
+          }, this.pressTime);
+        });
+      }
     };
 
-    // Start the sequence with a delay to ensure notifications are set up
-    setTimeout(executeSequence, 500);
+    setTimeout(executeSequence, 1000);
   }
 }
