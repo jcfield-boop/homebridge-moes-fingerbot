@@ -9,32 +9,423 @@ module.exports = function(homebridge) {
   homebridge.registerAccessory('homebridge-moes-fingerbot', 'MoesFingerbot', MoesFingerbotAccessory);
 };
 
+// Exact constants from Python
+const Coder = {
+  FUN_SENDER_DEVICE_INFO: 0,
+  FUN_SENDER_PAIR: 1,
+  FUN_SENDER_DPS: 2,
+  FUN_SENDER_DEVICE_STATUS: 3,
+  FUN_RECEIVE_TIME1_REQ: 32785,
+  FUN_RECEIVE_DP: 32769
+};
+
+const DpType = {
+  RAW: 0,
+  BOOLEAN: 1,
+  INT: 2,
+  STRING: 3,
+  ENUM: 4
+};
+
+const DpAction = {
+  ARM_DOWN_PERCENT: 9,
+  ARM_UP_PERCENT: 15,
+  CLICK_SUSTAIN_TIME: 10,
+  TAP_ENABLE: 17,
+  MODE: 8,
+  INVERT_SWITCH: 11,
+  TOGGLE_SWITCH: 2,
+  CLICK: 101,
+  PROG: 121
+};
+
+// FIXED: Exact CRC implementation from Python
+class CrcUtils {
+  static crc16(data) {
+    let crc = 0xFFFF;
+    for (const byte of data) {
+      crc ^= byte & 255;  // Exact Python: byte & 255
+      for (let i = 0; i < 8; i++) {
+        const tmp = crc & 1;
+        crc >>= 1;
+        if (tmp !== 0) {
+          crc ^= 0xA001;
+        }
+      }
+    }
+    return crc;
+  }
+}
+
+// FIXED: Exact AES implementation from Python  
+class AesUtils {
+  static decrypt(data, iv, key) {
+    const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+    return Buffer.concat([decipher.update(data), decipher.final()]);
+  }
+
+  static encrypt(data, iv, key) {
+    const cipher = crypto.createCipheriv('aes-128-cbc', key, iv);
+    return Buffer.concat([cipher.update(data), cipher.final()]);
+  }
+}
+
+// FIXED: Exact packet preparation from Python
+class TuyaDataPacket {
+  static prepareCrc(snAck, ackSn, code, inp, inpLength) {
+    // Exact Python struct: pack('>IIHH', sn_ack, ack_sn, code, inp_length)
+    const raw = Buffer.alloc(12 + inp.length);
+    raw.writeUInt32BE(snAck, 0);      // >I
+    raw.writeUInt32BE(ackSn, 4);      // >I  
+    raw.writeUInt16BE(code, 8);       // >H
+    raw.writeUInt16BE(inpLength, 10); // >H
+    inp.copy(raw, 12);
+    
+    const crc = CrcUtils.crc16(raw);
+    const result = Buffer.alloc(raw.length + 2);
+    raw.copy(result, 0);
+    result.writeUInt16BE(crc, raw.length); // >H
+    
+    return result;
+  }
+
+  static getRandomIv() {
+    return crypto.randomBytes(16);
+  }
+
+  static encryptPacket(secretKey, securityFlag, iv, data) {
+    // Exact Python padding
+    while (data.length % 16 !== 0) {
+      data = Buffer.concat([data, Buffer.from([0x00])]);
+    }
+
+    const encryptedData = AesUtils.encrypt(data, iv, secretKey);
+    
+    // Exact Python structure: security_flag + iv + encrypted_data
+    const output = Buffer.alloc(1 + 16 + encryptedData.length);
+    let offset = 0;
+    
+    output.writeUInt8(securityFlag, offset); offset += 1;
+    iv.copy(output, offset); offset += 16;
+    encryptedData.copy(output, offset);
+    
+    return output;
+  }
+}
+
+// FIXED: Exact packet splitting from Python
+class XRequest {
+  constructor(snAck, ackSn, code, securityFlag, secretKey, iv, inp) {
+    this.gattMtu = 20;
+    this.snAck = snAck;
+    this.ackSn = ackSn;
+    this.code = code;
+    this.securityFlag = securityFlag;
+    this.secretKey = secretKey;
+    this.iv = iv;
+    this.inp = inp;
+  }
+
+  pack() {
+    const data = TuyaDataPacket.prepareCrc(this.snAck, this.ackSn, this.code, this.inp, this.inp.length);
+    const encryptedData = TuyaDataPacket.encryptPacket(this.secretKey, this.securityFlag, this.iv, data);
+    
+    return this.splitPacket(2, encryptedData);
+  }
+
+  // FIXED: Exact Python split_packet implementation
+  splitPacket(protocolVersion, data) {
+    const output = [];
+    let packetNumber = 0;
+    let pos = 0;
+    const length = data.length;
+    
+    while (pos < length) {
+      let packet = Buffer.alloc(0);
+      
+      // Add packet number (single byte)
+      packet = Buffer.concat([packet, Buffer.from([packetNumber])]);
+      
+      if (packetNumber === 0) {
+        // FIXED: Add length (single byte) - Python: pack('>B', length)
+        packet = Buffer.concat([packet, Buffer.from([length])]);
+        
+        // FIXED: Add protocol version (LITTLE ENDIAN!) - Python: pack('<B', protocol_version << 4)
+        const versionByte = Buffer.alloc(1);
+        versionByte.writeUInt8(protocolVersion << 4, 0); // This is actually little endian for single byte
+        packet = Buffer.concat([packet, versionByte]);
+      }
+      
+      // Add data chunk
+      const remainingMtu = this.gattMtu - packet.length;
+      const dataChunk = data.slice(pos, pos + remainingMtu);
+      packet = Buffer.concat([packet, dataChunk]);
+      
+      output.push(packet);
+      
+      pos += dataChunk.length;
+      packetNumber += 1;
+    }
+    
+    return output;
+  }
+}
+
+// FIXED: Exact Python BleReceiver implementation  
+class BleReceiver {
+  constructor(secretKeyManager, accessory) {
+    this.secretKeyManager = secretKeyManager;
+    this.accessory = accessory;
+    this.reset();
+  }
+
+  reset() {
+    this.lastIndex = 0;
+    this.dataLength = 0;
+    this.currentLength = 0;
+    this.raw = Buffer.alloc(0);
+    this.version = 0;
+  }
+
+  // FIXED: Exact Python unpack implementation
+  unpack(arr) {
+    let i = 0;
+    let packetNumber = 0;
+    
+    // Parse packet number (variable length encoding)
+    while (i < 4 && i < arr.length) {
+      const b = arr[i];
+      packetNumber |= (b & 255) << (i * 7);
+      if (((b >> 7) & 1) === 0) {
+        break;
+      }
+      i++;
+    }
+    
+    let pos = i + 1;
+    
+    if (packetNumber === 0) {
+      // Parse data length (variable length encoding)
+      this.dataLength = 0;
+      
+      while (pos <= i + 4 && pos < arr.length) {
+        const b2 = arr[pos];
+        this.dataLength |= (b2 & 255) << (((pos - 1) - i) * 7);
+        if (((b2 >> 7) & 1) === 0) {
+          break;
+        }
+        pos++;
+      }
+      
+      this.currentLength = 0;
+      this.lastIndex = 0;
+      
+      if (pos === i + 5 || arr.length < pos + 2) {
+        return 2; // Error
+      }
+      
+      this.raw = Buffer.alloc(0);
+      pos += 1;
+      this.version = (arr[pos] >> 4) & 15;
+      pos += 1;
+    }
+    
+    if (packetNumber === 0 || packetNumber > this.lastIndex) {
+      const data = arr.slice(pos);
+      this.currentLength += data.length;
+      this.lastIndex = packetNumber;
+      this.raw = Buffer.concat([this.raw, data]);
+      
+      if (this.currentLength < this.dataLength) {
+        return 1; // Need more data
+      }
+      
+      return this.currentLength === this.dataLength ? 0 : 3; // Complete or error
+    }
+    
+    return 1; // Need more data
+  }
+
+  parseDataReceived(arr) {
+    const status = this.unpack(arr);
+    
+    if (status === 0) {
+      // Complete packet received
+      const securityFlag = this.raw[0];
+      const secretKey = this.secretKeyManager.get(securityFlag);
+      
+      if (!secretKey) {
+        this.accessory.log(`❌ No secret key for security flag: ${securityFlag}`);
+        return null;
+      }
+      
+      const result = this.parseResponse(this.raw, this.version, secretKey);
+      this.reset(); // Reset for next packet
+      return result;
+    }
+    
+    return null; // Incomplete packet
+  }
+
+  parseResponse(raw, version, secretKey) {
+    try {
+      const securityFlag = raw[0];
+      const iv = raw.slice(1, 17);
+      const encryptedData = raw.slice(17);
+      
+      this.accessory.log(`🔓 Attempting decryption: security_flag=${securityFlag}, iv=${iv.toString('hex')}`);
+      
+      // Decrypt
+      const decryptedData = AesUtils.decrypt(encryptedData, iv, secretKey);
+      
+      this.accessory.log(`🔓 Decrypted raw: ${decryptedData.toString('hex')}`);
+      
+      // FIXED: Validate CRC like Python
+      if (decryptedData.length < 14) { // 12 bytes header + 2 bytes CRC
+        throw new Error('Decrypted data too short');
+      }
+      
+      const dataWithoutCrc = decryptedData.slice(0, -2);
+      const receivedCrc = decryptedData.readUInt16BE(decryptedData.length - 2);
+      const calculatedCrc = CrcUtils.crc16(dataWithoutCrc);
+      
+      if (receivedCrc !== calculatedCrc) {
+        throw new Error(`CRC mismatch: received=${receivedCrc}, calculated=${calculatedCrc}`);
+      }
+      
+      this.accessory.log(`✅ CRC validation passed`);
+      
+      // Parse decrypted data structure
+      const sn = decryptedData.readUInt32BE(0);
+      const snAck = decryptedData.readUInt32BE(4);
+      const code = decryptedData.readUInt16BE(8);
+      const length = decryptedData.readUInt16BE(10);
+      const rawData = decryptedData.slice(12, 12 + length);
+      
+      this.accessory.log(`📋 Parsed: sn=${sn}, snAck=${snAck}, code=${code}, length=${length}`);
+      
+      let resp = null;
+      
+      if (code === Coder.FUN_SENDER_DEVICE_INFO) {
+        resp = this.parseDeviceInfoResponse(rawData);
+      } else if (code === Coder.FUN_SENDER_PAIR) {
+        resp = { success: true };
+      } else if (code === Coder.FUN_SENDER_DPS) {
+        resp = this.parseDPResponse(rawData);
+      }
+      
+      return {
+        raw,
+        version,
+        securityFlag,
+        code,
+        sn,
+        snAck,
+        resp
+      };
+      
+    } catch (error) {
+      this.accessory.log(`❌ Response parsing failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  parseDeviceInfoResponse(rawData) {
+    this.accessory.log(`📱 Device info response: ${rawData.toString('hex')}`);
+    
+    if (rawData.length < 46) {
+      this.accessory.log(`❌ Device info too short: ${rawData.length} bytes`);
+      return { success: false };
+    }
+    
+    try {
+      // Exact Python parsing: unpack('>BBBBBB6sBB32s', raw[:46])
+      const deviceVersionMajor = rawData.readUInt8(0);
+      const deviceVersionMinor = rawData.readUInt8(1);
+      const protocolVersionMajor = rawData.readUInt8(2);
+      const protocolVersionMinor = rawData.readUInt8(3);
+      const flag = rawData.readUInt8(4);
+      const isBind = rawData.readUInt8(5);
+      const srand = rawData.slice(6, 12); // 6 bytes
+      const hardwareVersionMajor = rawData.readUInt8(12);
+      const hardwareVersionMinor = rawData.readUInt8(13);
+      const authKey = rawData.slice(14, 46); // 32 bytes
+      
+      const deviceVersion = `${deviceVersionMajor}.${deviceVersionMinor}`;
+      const protocolVersion = `${protocolVersionMajor}.${protocolVersionMinor}`;
+      
+      this.accessory.log(`📱 Device: ${deviceVersion}, Protocol: ${protocolVersion}, Srand: ${srand.toString('hex')}`);
+      
+      const protocolNumber = protocolVersionMajor * 10 + protocolVersionMinor;
+      if (protocolNumber < 20) {
+        this.accessory.log(`❌ Protocol version too old: ${protocolNumber}`);
+        return { success: false };
+      }
+      
+      return {
+        success: true,
+        device_version: deviceVersion,
+        protocol_version: protocolVersion,
+        flag,
+        is_bind: isBind,
+        srand
+      };
+      
+    } catch (error) {
+      this.accessory.log(`❌ Device info parsing failed: ${error.message}`);
+      return { success: false };
+    }
+  }
+
+  parseDPResponse(rawData) {
+    this.accessory.log(`📦 DP Response: ${rawData.toString('hex')}`);
+    return { dps: {} };
+  }
+}
+
+// Secret Key Manager (exact Python implementation)
+class SecretKeyManager {
+  constructor(loginKey) {
+    this.loginKey = loginKey;
+    this.keys = {
+      4: crypto.createHash('md5').update(this.loginKey).digest()
+    };
+  }
+
+  get(securityFlag) {
+    return this.keys[securityFlag] || null;
+  }
+
+  setSrand(srand) {
+    const combined = Buffer.concat([this.loginKey, srand]);
+    this.keys[5] = crypto.createHash('md5').update(combined).digest();
+  }
+}
+
 class MoesFingerbotAccessory {
   constructor(log, config) {
     this.log = log;
     this.name = config.name || 'MOES Fingerbot';
     this.address = config.address ? config.address.toLowerCase() : null;
     
-    // Required credentials
     this.deviceId = config.deviceId;
     this.localKey = config.localKey;
     
-    this.log(`🔧 Step-by-Step Diagnostic: deviceId=${this.deviceId}, address=${this.address}`);
+    this.log(`🔧 Fixed Protocol: deviceId=${this.deviceId}, address=${this.address}`);
     
     if (!this.deviceId || !this.localKey || !this.address) {
-      this.log('❌ ERROR: deviceId, localKey, and address are all required');
       throw new Error('Missing required configuration');
     }
 
-    // Initialize credentials exactly like Python
+    // Exact Python initialization
     this.uuid = Buffer.from(this.deviceId, 'utf8');
-    this.devId = Buffer.from(this.deviceId, 'utf8');
+    this.devId = Buffer.from(this.deviceId, 'utf8');  
     this.loginKey = Buffer.from(this.localKey.slice(0, 6), 'utf8');
     
     this.log(`🔑 Login key: "${this.localKey.slice(0, 6)}" -> ${this.loginKey.toString('hex')}`);
     
-    // Test multiple key generation approaches
-    this.testKeyGeneration();
+    this.secretKeyManager = new SecretKeyManager(this.loginKey);
+    this.bleReceiver = new BleReceiver(this.secretKeyManager, this);
     
     // Device state
     this.isOn = false;
@@ -42,7 +433,7 @@ class MoesFingerbotAccessory {
     this.currentPeripheral = null;
     this.bluetoothReady = false;
     this.operationInProgress = false;
-    this.responseCount = 0;
+    this.snAck = 0;
     
     // Setup HomeKit services
     this.switchService = new Service.Switch(this.name);
@@ -56,44 +447,15 @@ class MoesFingerbotAccessory {
       .getCharacteristic(Characteristic.BatteryLevel)
       .on('get', this.getBatteryLevel.bind(this));
 
-    // Setup Bluetooth
     this.setupBluetoothEvents();
     
-    // Auto-test on startup
     if (noble.state === 'poweredOn') {
       this.bluetoothReady = true;
-      this.log('Starting step-by-step communication diagnostic in 3 seconds...');
+      this.log('Starting FIXED protocol test in 3 seconds...');
       setTimeout(() => {
-        this.runStepByStepDiagnostic();
+        this.testFixedProtocol();
       }, 3000);
     }
-  }
-
-  testKeyGeneration() {
-    this.log(`\n🔐 Testing different key generation approaches:`);
-    
-    // Approach 1: Python method (first 6 chars only)
-    const key1 = Buffer.from(this.localKey.slice(0, 6), 'utf8');
-    const secret1 = crypto.createHash('md5').update(key1).digest();
-    this.log(`   1. Python method: "${this.localKey.slice(0, 6)}" -> ${secret1.toString('hex')}`);
-    
-    // Approach 2: Full local key
-    const key2 = Buffer.from(this.localKey, 'utf8');
-    const secret2 = crypto.createHash('md5').update(key2).digest();
-    this.log(`   2. Full key method: "${this.localKey}" -> ${secret2.toString('hex')}`);
-    
-    // Approach 3: Hex interpretation
-    try {
-      const key3 = Buffer.from(this.localKey, 'hex');
-      const secret3 = crypto.createHash('md5').update(key3).digest();
-      this.log(`   3. Hex interpretation: ${key3.toString('hex')} -> ${secret3.toString('hex')}`);
-    } catch (error) {
-      this.log(`   3. Hex interpretation: FAILED (${error.message})`);
-    }
-    
-    // Store different secrets for testing
-    this.secretVariants = [secret1, secret2];
-    this.currentSecretIndex = 0;
   }
 
   setupBluetoothEvents() {
@@ -101,7 +463,6 @@ class MoesFingerbotAccessory {
       this.log(`📡 Bluetooth state: ${state}`);
       if (state === 'poweredOn') {
         this.bluetoothReady = true;
-        this.log('✅ Bluetooth ready');
       } else {
         this.bluetoothReady = false;
         this.forceDisconnect();
@@ -119,8 +480,8 @@ class MoesFingerbotAccessory {
 
   setOn(value, callback) {
     if (value) {
-      this.log('🔴 Switch activated - running step-by-step diagnostic...');
-      this.runStepByStepDiagnostic()
+      this.log('🔴 Testing fixed protocol...');
+      this.testFixedProtocol()
         .then(() => {
           callback(null);
           setTimeout(() => {
@@ -128,7 +489,6 @@ class MoesFingerbotAccessory {
           }, 1000);
         })
         .catch(error => {
-          this.log(`❌ Diagnostic failed: ${error.message}`);
           callback(error);
         });
     } else {
@@ -141,305 +501,107 @@ class MoesFingerbotAccessory {
     callback(null, level);
   }
 
-  async runStepByStepDiagnostic() {
+  nextSnAck() {
+    this.snAck += 1;
+    return this.snAck;
+  }
+
+  resetSnAck() {
+    this.snAck = 0;
+  }
+
+  async testFixedProtocol() {
     if (this.operationInProgress) {
-      this.log('⚠️ Diagnostic already in progress');
       return;
     }
 
     try {
       this.operationInProgress = true;
-      this.responseCount = 0;
+      this.log('🔬 Testing FIXED protocol implementation...');
       
-      this.log('\n🧪 Starting comprehensive step-by-step diagnostic...');
+      const { writeChar, notifyChar } = await this.connectAndSetup();
+      await this.runProtocolSequence(writeChar, notifyChar);
       
-      const { writeChar, notifyChar } = await this.connectAndSetupNotifications();
-      
-      // Step 1: Test device responsiveness with simple commands
-      await this.testBasicResponsiveness(writeChar, notifyChar);
-      
-      // Step 2: Test different unencrypted approaches
-      await this.testUnencryptedCommands(writeChar, notifyChar);
-      
-      // Step 3: Test different encryption keys
-      await this.testDifferentEncryption(writeChar, notifyChar);
-      
-      // Step 4: Test protocol variations
-      await this.testProtocolVariations(writeChar, notifyChar);
-      
-      this.log(`\n📊 Diagnostic Summary: Received ${this.responseCount} responses total`);
-      this.log('✅ Step-by-step diagnostic completed');
+      this.log('✅ Fixed protocol test completed');
       
     } catch (error) {
-      this.log(`❌ Step-by-step diagnostic failed: ${error.message}`);
+      this.log(`❌ Fixed protocol test failed: ${error.message}`);
     } finally {
       this.operationInProgress = false;
       this.forceDisconnect();
     }
   }
 
-  async connectAndSetupNotifications() {
+  async connectAndSetup() {
     const peripheral = await this.scanAndConnect();
     
     return new Promise((resolve, reject) => {
       peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-        if (error) {
-          return reject(error);
-        }
+        if (error) return reject(error);
 
-        const writeChar = characteristics.find(char => 
-          char.uuid.toLowerCase().includes('2b11')
-        );
-        const notifyChar = characteristics.find(char => 
-          char.uuid.toLowerCase().includes('2b10')
-        );
+        const writeChar = characteristics.find(char => char.uuid.toLowerCase().includes('2b11'));
+        const notifyChar = characteristics.find(char => char.uuid.toLowerCase().includes('2b10'));
 
         if (!writeChar || !notifyChar) {
-          return reject(new Error('Required characteristics not found'));
+          return reject(new Error('Characteristics not found'));
         }
 
-        this.log('✅ Found characteristics, setting up notifications...');
-        
-        // Setup comprehensive notification monitoring
         notifyChar.subscribe((error) => {
-          if (error) {
-            return reject(error);
-          }
+          if (error) return reject(error);
           
           notifyChar.on('data', (data) => {
-            this.responseCount++;
-            this.log(`📥 RX #${this.responseCount}: ${data.toString('hex')}`);
-            this.analyzeResponse(data);
+            this.log(`📥 RX: ${data.toString('hex')}`);
+            const result = this.bleReceiver.parseDataReceived(data);
+            if (result) {
+              this.log(`🎯 Parsed response: code=${result.code}, sn=${result.sn}`);
+            }
           });
           
-          this.log('🔔 Notifications enabled - monitoring all responses');
+          this.log('🔔 Notifications enabled with FIXED receiver');
           resolve({ writeChar, notifyChar });
         });
       });
     });
   }
 
-  analyzeResponse(data) {
-    this.log(`🔬 Analyzing response (${data.length} bytes):`);
-    this.log(`   Hex: ${data.toString('hex')}`);
-    this.log(`   ASCII: ${this.toSafeAscii(data)}`);
+  async runProtocolSequence(writeChar, notifyChar) {
+    this.bleReceiver.reset();
+    this.resetSnAck();
     
-    // Check if it looks like encrypted Tuya data
-    if (data.length > 17) {
-      this.log(`   Potential encrypted packet (length=${data.length})`);
-      
-      // Try to decrypt with our secret keys
-      for (let i = 0; i < this.secretVariants.length; i++) {
-        try {
-          const secret = this.secretVariants[i];
-          const securityFlag = data[0];
-          const iv = data.slice(1, 17);
-          const encrypted = data.slice(17);
-          
-          const decipher = crypto.createDecipheriv('aes-128-cbc', secret, iv);
-          const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-          
-          this.log(`   ✅ Decryption attempt ${i + 1} SUCCESS!`);
-          this.log(`   Decrypted: ${decrypted.toString('hex')}`);
-          
-          // Parse decrypted structure
-          if (decrypted.length >= 12) {
-            const sn = decrypted.readUInt32BE(0);
-            const snAck = decrypted.readUInt32BE(4);
-            const code = decrypted.readUInt16BE(8);
-            const length = decrypted.readUInt16BE(10);
-            
-            this.log(`   Parsed: sn=${sn}, snAck=${snAck}, code=${code}, length=${length}`);
-          }
-          
-          return; // Success - no need to try other keys
-          
-        } catch (error) {
-          this.log(`   ❌ Decryption attempt ${i + 1} failed: ${error.message}`);
-        }
-      }
-    }
+    this.log('📤 Sending device info request with FIXED protocol...');
     
-    // Look for patterns
-    if (data.length === 1) {
-      this.log(`   Single byte response: 0x${data[0].toString(16).padStart(2, '0')}`);
-    }
+    // Send device info request
+    const inp = Buffer.alloc(0);
+    const iv = TuyaDataPacket.getRandomIv();
+    const securityFlag = 4;
+    const secretKey = this.secretKeyManager.get(securityFlag);
+    const snAck = this.nextSnAck();
     
-    // Check for common patterns
-    const patterns = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
-    for (const pattern of patterns) {
-      if (data[0] === pattern) {
-        this.log(`   Matches pattern: 0x${pattern.toString(16).padStart(2, '0')}`);
-      }
-    }
+    const request = new XRequest(snAck, 0, Coder.FUN_SENDER_DEVICE_INFO, securityFlag, secretKey, iv, inp);
+    this.sendRequest(writeChar, request);
+    
+    // Wait for response
+    await this.delay(10000);
   }
 
-  async testBasicResponsiveness(writeChar, notifyChar) {
-    this.log(`\n📋 Step 1: Testing basic device responsiveness...`);
+  sendRequest(writeChar, xRequest) {
+    const packets = xRequest.pack();
+    this.log(`📦 Sending ${packets.length} packets`);
     
-    const basicCommands = [
-      { name: 'Ping', data: Buffer.from([0x01]) },
-      { name: 'Status', data: Buffer.from([0x02]) },
-      { name: 'Hello', data: Buffer.from([0x00]) },
-      { name: 'Battery', data: Buffer.from([0x06]) },
-      { name: 'Wake', data: Buffer.from([0xFF]) },
-      { name: 'Empty', data: Buffer.from([]) },
-    ];
-
-    for (const cmd of basicCommands) {
-      this.log(`   📤 Testing ${cmd.name}: ${cmd.data.toString('hex')}`);
-      
-      try {
-        await this.writeCharacteristic(writeChar, cmd.data);
-        await this.delay(2000); // Wait for response
-      } catch (error) {
-        this.log(`   ❌ ${cmd.name} write failed: ${error.message}`);
-      }
+    for (let i = 0; i < packets.length; i++) {
+      const packet = packets[i];
+      this.log(`📤 TX[${i}]: ${packet.toString('hex')}`);
+      this.writeCharacteristic(writeChar, packet);
     }
-  }
-
-  async testUnencryptedCommands(writeChar, notifyChar) {
-    this.log(`\n📋 Step 2: Testing unencrypted protocol variations...`);
-    
-    // Test different packet structures
-    const unencryptedTests = [
-      {
-        name: 'Simple packet structure',
-        data: Buffer.from([0x01, 0x00, 0x00, 0x00]) // SeqNo, Cmd, Length
-      },
-      {
-        name: 'DP structure',
-        data: Buffer.from([0x01, 0x02, 0x01, 0x01]) // DP1, Type Bool, Length, Value
-      },
-      {
-        name: 'Tuya header',
-        data: Buffer.from([0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) // Basic Tuya structure
-      },
-      {
-        name: 'Device ID query',
-        data: Buffer.concat([Buffer.from([0x00]), Buffer.from(this.deviceId.slice(0, 8), 'utf8')])
-      }
-    ];
-
-    for (const test of unencryptedTests) {
-      this.log(`   📤 Testing ${test.name}: ${test.data.toString('hex')}`);
-      
-      try {
-        await this.writeCharacteristic(writeChar, test.data);
-        await this.delay(2000);
-      } catch (error) {
-        this.log(`   ❌ ${test.name} failed: ${error.message}`);
-      }
-    }
-  }
-
-  async testDifferentEncryption(writeChar, notifyChar) {
-    this.log(`\n📋 Step 3: Testing different encryption approaches...`);
-    
-    for (let i = 0; i < this.secretVariants.length; i++) {
-      const secret = this.secretVariants[i];
-      this.log(`   🔐 Testing secret variant ${i + 1}: ${secret.toString('hex')}`);
-      
-      try {
-        const testPacket = this.createSimpleEncryptedPacket(secret);
-        this.log(`   📤 Encrypted test packet: ${testPacket.toString('hex')}`);
-        
-        await this.writeCharacteristic(writeChar, testPacket);
-        await this.delay(3000); // Longer wait for encryption
-        
-      } catch (error) {
-        this.log(`   ❌ Encryption test ${i + 1} failed: ${error.message}`);
-      }
-    }
-  }
-
-  async testProtocolVariations(writeChar, notifyChar) {
-    this.log(`\n📋 Step 4: Testing protocol variations...`);
-    
-    // Test different approaches that might wake up the device
-    const protocolTests = [
-      {
-        name: 'Auth request',
-        data: Buffer.concat([
-          Buffer.from([0x00, 0x00, 0x00, 0x01]), // SeqNo = 1
-          Buffer.from([0x00, 0x00, 0x00, 0x00]), // AckSn = 0  
-          Buffer.from([0x00, 0x00]), // Code = 0 (device info)
-          Buffer.from([0x00, 0x00]), // Length = 0
-        ])
-      },
-      {
-        name: 'Login attempt',
-        data: Buffer.concat([
-          this.loginKey,
-          Buffer.from([0x00, 0x00])
-        ])
-      },
-      {
-        name: 'Device ID handshake',
-        data: Buffer.concat([
-          Buffer.from([0x01]), // Some kind of init
-          Buffer.from(this.deviceId.slice(0, 10), 'utf8')
-        ])
-      }
-    ];
-
-    for (const test of protocolTests) {
-      this.log(`   📤 Testing ${test.name}: ${test.data.toString('hex')}`);
-      
-      try {
-        await this.writeCharacteristic(writeChar, test.data);
-        await this.delay(2000);
-      } catch (error) {
-        this.log(`   ❌ ${test.name} failed: ${error.message}`);
-      }
-    }
-  }
-
-  createSimpleEncryptedPacket(secretKey) {
-    // Create a minimal encrypted packet for testing
-    const iv = crypto.randomBytes(16);
-    
-    // Simple payload: SeqNo=1, AckSn=0, Code=0, Length=0
-    let payload = Buffer.from([
-      0x00, 0x00, 0x00, 0x01, // SeqNo
-      0x00, 0x00, 0x00, 0x00, // AckSn
-      0x00, 0x00,             // Code
-      0x00, 0x00              // Length
-    ]);
-    
-    // Pad to 16 bytes
-    while (payload.length % 16 !== 0) {
-      payload = Buffer.concat([payload, Buffer.from([0x00])]);
-    }
-    
-    // Encrypt
-    const cipher = crypto.createCipheriv('aes-128-cbc', secretKey, iv);
-    const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
-    
-    // Build final packet: SecurityFlag + IV + Encrypted
-    return Buffer.concat([
-      Buffer.from([0x04]), // Security flag 4
-      iv,
-      encrypted
-    ]);
-  }
-
-  toSafeAscii(buffer) {
-    return buffer.toString('ascii').replace(/[^\x20-\x7E]/g, '.');
   }
 
   async writeCharacteristic(characteristic, data) {
     return new Promise((resolve, reject) => {
-      if (data.length === 0) {
-        // Some devices don't like empty packets
-        return resolve();
-      }
-      
       characteristic.write(data, false, (error) => {
         if (error) {
           reject(error);
         } else {
-          resolve();
+          setTimeout(() => resolve(), 50);
         }
       });
     });
@@ -451,31 +613,28 @@ class MoesFingerbotAccessory {
       
       const discoverHandler = async (peripheral) => {
         if (peripheral.address === this.address) {
-          this.log(`📡 Found device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
+          this.log(`📡 Found device: ${peripheral.address}`);
           
           noble.stopScanning();
           noble.removeListener('discover', discoverHandler);
 
           peripheral.connect((error) => {
-            if (error) {
-              return reject(error);
-            }
+            if (error) return reject(error);
             
             this.currentPeripheral = peripheral;
-            this.log('✅ Connected to device');
+            this.log('✅ Connected with fixed protocol');
             resolve(peripheral);
           });
         }
       };
 
       noble.on('discover', discoverHandler);
-      this.log('🔍 Scanning for device...');
       noble.startScanning([], true);
 
       setTimeout(() => {
         noble.stopScanning();
         noble.removeListener('discover', discoverHandler);
-        reject(new Error('Device not found during scan'));
+        reject(new Error('Device not found'));
       }, 15000);
     });
   }
@@ -490,9 +649,7 @@ class MoesFingerbotAccessory {
         noble.stopScanning();
       }
       noble.removeAllListeners('discover');
-    } catch (error) {
-      // Ignore cleanup errors
-    }
+    } catch (error) {}
     
     if (this.currentPeripheral) {
       try {
@@ -500,9 +657,7 @@ class MoesFingerbotAccessory {
           this.currentPeripheral.disconnect();
         }
         this.currentPeripheral.removeAllListeners();
-      } catch (error) {
-        // Ignore cleanup errors
-      }
+      } catch (error) {}
       this.currentPeripheral = null;
     }
     
