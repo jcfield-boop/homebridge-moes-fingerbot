@@ -153,6 +153,7 @@ class MoesFingerbotAccessory {
     this.generateKeys();
     
     // Device state
+    this.isOn = false;
     this.batteryLevel = -1;
     this.isConnected = false;
     this.currentPeripheral = null;
@@ -163,6 +164,12 @@ class MoesFingerbotAccessory {
     this.responseParser = new ResponseParser(this);
     
     // Setup HomeKit services
+    this.switchService = new Service.Switch(this.name);
+    this.switchService
+      .getCharacteristic(Characteristic.On)
+      .on('get', this.getOn.bind(this))
+      .on('set', this.setOn.bind(this));
+
     this.batteryService = new Service.BatteryService(this.name);
     this.batteryService
       .getCharacteristic(Characteristic.BatteryLevel)
@@ -205,7 +212,31 @@ class MoesFingerbotAccessory {
   }
 
   getServices() {
-    return [this.batteryService];
+    return [this.switchService, this.batteryService];
+  }
+
+  getOn(callback) {
+    callback(null, false); // Always return false since this is just a momentary switch
+  }
+
+  setOn(value, callback) {
+    if (value) {
+      this.log('🔴 Switch activated - running communication test...');
+      this.testBatteryRead()
+        .then(() => {
+          callback(null);
+          // Reset switch to off after a moment
+          setTimeout(() => {
+            this.switchService.updateCharacteristic(Characteristic.On, false);
+          }, 1000);
+        })
+        .catch(error => {
+          this.log(`❌ Test failed: ${error.message}`);
+          callback(error);
+        });
+    } else {
+      callback(null);
+    }
   }
 
   getBatteryLevel(callback) {
