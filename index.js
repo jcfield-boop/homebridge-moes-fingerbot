@@ -266,15 +266,16 @@ class MoesFingerbotAccessory {
   encryptDataV1(data) {
     const timestamp = Math.floor(Date.now() / 1000);
     const deviceIdBuffer = Buffer.from(this.deviceId, 'utf8');
-    
+
     const timestampBuffer = Buffer.alloc(4);
     timestampBuffer.writeUInt32BE(timestamp, 0);
     const authData = Buffer.concat([deviceIdBuffer, timestampBuffer, data]);
-    
+
     const paddingNeeded = 16 - (authData.length % 16);
     const paddedData = Buffer.concat([authData, Buffer.alloc(paddingNeeded, paddingNeeded)]);
-    
-    const cipher = crypto.createCipher('aes-128-ecb', this.sessionKey);
+
+    // FIX: Use createCipheriv instead of deprecated createCipher
+    const cipher = crypto.createCipheriv('aes-128-ecb', this.sessionKey, null);
     cipher.setAutoPadding(false);
     return Buffer.concat([cipher.update(paddedData), cipher.final()]);
   }
@@ -411,17 +412,51 @@ class MoesFingerbotAccessory {
 
   // ENHANCED COMMAND DIAGNOSTIC: Targeted for blliqpsj Fingerbot Plus
   getCommandTestConfigurations() {
+    const dpMappings = this.getTuyaDPMappings && this.getTuyaDPMappings();
+
     const baseConfigs = [
-      // Test 1: Main trigger DP1 (most likely for Click mode)
+      // Test 0: Device Detection Test
       {
-        name: "DP1 Main Trigger (Click Mode)",
+        name: "Device Detection & Response Test",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true), // DP1 = true
+          () => {
+            this.log('[COMMAND-DIAG] 🔍 Testing if device responds to ANY command...');
+            this.log('[COMMAND-DIAG] 📱 MAKE SURE: Tuya Smart app is closed OR device is in pairing mode');
+            // Simple ping command
+            return this.createTuyaBLEPacket(0x00, Buffer.from([0x00]), false, false);
+          }
+        ],
+        delay: 3000
+      },
+
+      // Test 1: Force device wake-up
+      {
+        name: "Device Wake-up Sequence",
+        commands: [
+          () => {
+            this.log('[COMMAND-DIAG] 🚨 If Fingerbot has a physical button, PRESS AND HOLD IT NOW!');
+            this.log('[COMMAND-DIAG] ⏰ Sending wake-up command in 3 seconds...');
+            // Try to wake device
+            return this.createTuyaBLEPacket(0x01, Buffer.from(this.deviceId, 'utf8'), false);
+          }
+        ],
+        delay: 5000
+      },
+
+      // Test 2: Raw unencrypted DP1
+      {
+        name: "Raw DP1 Trigger (No Encryption)",
+        commands: [
+          () => {
+            this.log('[COMMAND-DIAG] 🎯 Sending simplest possible trigger command...');
+            // Simplest DP1 command
+            return this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), false, false);
+          }
         ],
         delay: this.pressTime
       },
 
-      // Test 2: Mode setting + trigger (Switch to Click mode then trigger)
+      // Test 3: Mode setting + trigger (Switch to Click mode then trigger)
       {
         name: "Set Click Mode + Trigger",
         commands: [
@@ -431,7 +466,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 3: Switch mode test
+      // Test 4: Switch mode test
       {
         name: "Switch Mode Toggle",
         commands: [
@@ -441,7 +476,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 4: Resistance coefficient setting (DP3 likely)
+      // Test 5: Resistance coefficient setting (DP3 likely)
       {
         name: "Set Resistance + Trigger",
         commands: [
@@ -451,7 +486,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 5: Down movement percentage (DP4 likely)
+      // Test 6: Down movement percentage (DP4 likely)
       {
         name: "Set Down Movement + Trigger",
         commands: [
@@ -461,7 +496,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 6: Sustain time (DP5 likely)
+      // Test 7: Sustain time (DP5 likely)
       {
         name: "Set Sustain Time + Trigger",
         commands: [
@@ -471,7 +506,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 7: Programming mode activation
+      // Test 8: Programming mode activation
       {
         name: "Programming Mode Test",
         commands: [
@@ -481,7 +516,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 8: Calibration command (DP6 likely)
+      // Test 9: Calibration command (DP6 likely)
       {
         name: "Calibration Command",
         commands: [
@@ -490,7 +525,7 @@ class MoesFingerbotAccessory {
         delay: 5000 // Calibration might take longer
       },
 
-      // Test 9: Adaptive movement setting
+      // Test 10: Adaptive movement setting
       {
         name: "Adaptive Movement + Trigger",
         commands: [
@@ -500,7 +535,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 10: Complete setup sequence
+      // Test 11: Complete setup sequence
       {
         name: "Complete Setup + Click Mode",
         commands: [
@@ -524,7 +559,7 @@ class MoesFingerbotAccessory {
         delay: this.pressTime
       },
 
-      // Test 11: Auth sequence + Status query + Action
+      // Test 12: Auth sequence + Status query + Action
       {
         name: "Full Auth + Status + Action",
         commands: [
@@ -998,9 +1033,8 @@ class MoesFingerbotAccessory {
       if (this.connecting) {
         return reject(new Error('Already connecting'));
       }
-
       this.forceDisconnect();
-      
+
       setTimeout(() => {
         this.doConnection(peripheral, resolve, reject);
       }, 1000);
@@ -1009,10 +1043,9 @@ class MoesFingerbotAccessory {
 
   executeWorkingSequence(writeChar, notifyChar, peripheral, cleanup, resolve, reject) {
     this.log(`[DEBUG] Executing WORKING ${this.deviceModel} Fingerbot sequence (model: ${this.deviceId.substring(0,8)})...`);
-    
     this.generateSessionKey();
     this.setupEnhancedNotifications(notifyChar);
-    
+
     let operationTimeout = null;
     let sequenceComplete = false;
 
@@ -1025,106 +1058,98 @@ class MoesFingerbotAccessory {
       }
     }, 12000);
 
-    const executeSequence = () => {
-      // For blliqpsj Fingerbot Plus, use specific DP mappings based on app exploration
-      const isBlliqpsj = this.deviceId.startsWith('blliqpsj');
-      const useV2 = true; // Always use v2 for Plus models
-      
-      if (isBlliqpsj) {
-        // Sequence for blliqpsj Fingerbot Plus
-        this.log('[DEBUG] Using blliqpsj Fingerbot Plus sequence...');
-        
-        // Step 1: Set Click mode
-        const setClickMode = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x04, 0x43, 0x6C, 0x69, 0x63]), true, true);
-        
-        this.log('[DEBUG] Setting Click mode...');
-        writeChar.write(setClickMode, true, (error) => {
-          if (error) {
-            this.log(`[DEBUG] Click mode setting error: ${error}`);
-          } else {
-            this.log('[DEBUG] Click mode set successfully');
-          }
+    const isBlliqpsj = this.deviceId.startsWith('blliqpsj');
+    const useV2 = true; // Always use v2 for Plus models
 
-          // Step 2: Wait then trigger action
-          setTimeout(() => {
-            if (sequenceComplete || peripheral.state !== 'connected') return;
-
-            const triggerAction = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true);
-            
-            this.log('[DEBUG] Triggering Fingerbot action...');
-            writeChar.write(triggerAction, true, (error) => {
-              if (error) {
-                this.log(`[DEBUG] Trigger command error: ${error}`);
-              } else {
-                this.log('[DEBUG] Trigger command sent successfully');
-              }
-
-              // Complete the operation
-              sequenceComplete = true;
-              clearTimeout(operationTimeout);
-              cleanup();
-              
-              setTimeout(() => {
-                this.forceDisconnect();
-                this.log('[DEBUG] blliqpsj Fingerbot Plus operation completed successfully!');
-                resolve();
-              }, 1000);
-            });
-          }, 1000); // Wait 1 second between mode setting and trigger
-        });
-        
-      } else {
-        // Fallback for other Plus models or unknown variants
-        this.log('[DEBUG] Using fallback Plus sequence...');
-        
-        const pressDP = this.deviceModel === 'plus' ? [0x01, 0x01, 0x00, 0x01, 0x01] : [0x02, 0x01, 0x00, 0x01, 0x01];
-        const releaseDP = this.deviceModel === 'plus' ? [0x01, 0x01, 0x00, 0x01, 0x00] : [0x02, 0x01, 0x00, 0x01, 0x00];
-
-        const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from(pressDP), true, useV2);
-        const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from(releaseDP), true, useV2);
-
-        if (!pressPacket || !releasePacket) {
-          sequenceComplete = true;
-          clearTimeout(operationTimeout);
-          cleanup();
-          this.forceDisconnect();
-          return reject(new Error('Failed to create command packets'));
+    if (isBlliqpsj) {
+      this.log('[DEBUG] Using blliqpsj Fingerbot Plus sequence...');
+      // Step 1: Set Click mode
+      const setClickMode = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x04, 0x00, 0x04, 0x43, 0x6C, 0x69, 0x63]), true, true);
+      this.log('[DEBUG] Setting Click mode...');
+      writeChar.write(setClickMode, true, (error) => {
+        if (error) {
+          this.log(`[DEBUG] Click mode setting error: ${error}`);
+        } else {
+          this.log('[DEBUG] Click mode set successfully');
         }
+        // Step 2: Wait then trigger action
+        setTimeout(() => {
+          if (sequenceComplete || peripheral.state !== 'connected') return;
+          const triggerAction = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true, true);
+          this.log('[DEBUG] Triggering Fingerbot action...');
+          writeChar.write(triggerAction, true, (error) => {
+            if (error) {
+              this.log(`[DEBUG] Trigger command error: ${error}`);
+            } else {
+              this.log('[DEBUG] Trigger command sent successfully');
+            }
+            // Step 3: Wait for pressTime, then release
+            setTimeout(() => {
+              if (sequenceComplete || peripheral.state !== 'connected') return;
+              const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true, true);
+              this.log('[DEBUG] Releasing Fingerbot...');
+              writeChar.write(releasePacket, true, (error) => {
+                if (error) {
+                  this.log(`[DEBUG] Release command error: ${error}`);
+                } else {
+                  this.log('[DEBUG] Release command sent successfully');
+                }
+                sequenceComplete = true;
+                clearTimeout(operationTimeout);
+                cleanup();
+                setTimeout(() => {
+                  this.forceDisconnect();
+                  this.log('[DEBUG] blliqpsj Fingerbot Plus operation completed successfully!');
+                  resolve();
+                }, 500);
+              });
+            }, this.pressTime);
+          });
+        }, 1000); // Wait 1 second between mode setting and trigger
+      });
+    } else {
+      // Fallback for other Plus models or unknown variants
+      this.log('[DEBUG] Using fallback Plus sequence...');
+      const pressDP = this.deviceModel === 'plus' ? [0x01, 0x01, 0x00, 0x01, 0x01] : [0x02, 0x01, 0x00, 0x01, 0x01];
+      const releaseDP = this.deviceModel === 'plus' ? [0x01, 0x01, 0x00, 0x01, 0x00] : [0x02, 0x01, 0x00, 0x01, 0x00];
+      const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from(pressDP), true, useV2);
+      const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from(releaseDP), true, useV2);
 
-        this.log(`[DEBUG] Sending fallback press command...`);
-        writeChar.write(pressPacket, true, (error) => {
-          if (error) {
-            this.log(`[DEBUG] Press command error: ${error}`);
-          } else {
-            this.log('[DEBUG] Press command sent successfully');
-          }
-
-          setTimeout(() => {
-            if (sequenceComplete || peripheral.state !== 'connected') return;
-
-            this.log(`[DEBUG] Sending fallback release command...`);
-            writeChar.write(releasePacket, true, (error) => {
-              if (error) {
-                this.log(`[DEBUG] Release command error: ${error}`);
-              } else {
-                this.log('[DEBUG] Release command sent successfully');
-              }
-
-              sequenceComplete = true;
-              clearTimeout(operationTimeout);
-              cleanup();
-              
-              setTimeout(() => {
-                this.forceDisconnect();
-                this.log(`[DEBUG] Fallback Fingerbot operation completed!`);
-                resolve();
-              }, 500);
-            });
-          }, this.pressTime);
-        });
+      if (!pressPacket || !releasePacket) {
+        sequenceComplete = true;
+        clearTimeout(operationTimeout);
+        cleanup();
+        this.forceDisconnect();
+        return reject(new Error('Failed to create command packets'));
       }
-    };
 
-    setTimeout(executeSequence, 1000);
+      this.log(`[DEBUG] Sending fallback press command...`);
+      writeChar.write(pressPacket, true, (error) => {
+        if (error) {
+          this.log(`[DEBUG] Press command error: ${error}`);
+        } else {
+          this.log('[DEBUG] Press command sent successfully');
+        }
+        setTimeout(() => {
+          if (sequenceComplete || peripheral.state !== 'connected') return;
+          this.log(`[DEBUG] Sending fallback release command...`);
+          writeChar.write(releasePacket, true, (error) => {
+            if (error) {
+              this.log(`[DEBUG] Release command error: ${error}`);
+            } else {
+              this.log('[DEBUG] Release command sent successfully');
+            }
+            sequenceComplete = true;
+            clearTimeout(operationTimeout);
+            cleanup();
+            setTimeout(() => {
+              this.forceDisconnect();
+              this.log(`[DEBUG] Fallback Fingerbot operation completed!`);
+              resolve();
+            }, 500);
+          });
+        }, this.pressTime);
+      });
+    }
   }
 }
