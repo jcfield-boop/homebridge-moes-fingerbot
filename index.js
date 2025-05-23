@@ -231,18 +231,18 @@ class MoesFingerbotAccessory {
   getCommandTestConfigurations() {
     return [
       {
-        name: "Basic DP1 BOOL (no encryption)",
+        name: "Basic DP2 BOOL (no encryption)",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), false), // DP1 = true
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), false)  // DP1 = false
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), false), // DP2 = true
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), false)  // DP2 = false
         ],
         delay: this.pressTime
       },
       {
-        name: "ENCRYPTED DP1 BOOL (with auth)",
+        name: "ENCRYPTED DP2 BOOL (with auth)",
         commands: [
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true), // DP1 = true (encrypted)
-          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true)  // DP1 = false (encrypted)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true), // DP2 = true (encrypted)
+          () => this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true)  // DP2 = false (encrypted)
         ],
         delay: this.pressTime
       },
@@ -757,12 +757,12 @@ class MoesFingerbotAccessory {
     // Execute the working press+release sequence (try encrypted first, then fallback)
     const executeSequence = () => {
       // Try encrypted commands first since device works with Tuya app
-      const pressPacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), true);
-      const releasePacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), true);
+      const pressPacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), true);
+      const releasePacketEncrypted = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), true);
       
       // Fallback to unencrypted
-      const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x01]), false);
-      const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x01, 0x01, 0x00, 0x01, 0x00]), false);
+      const pressPacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x01]), false);
+      const releasePacket = this.createTuyaBLEPacket(0x06, Buffer.from([0x02, 0x01, 0x00, 0x01, 0x00]), false);
 
       if (!pressPacketEncrypted || !releasePacketEncrypted) {
         sequenceComplete = true;
@@ -824,7 +824,7 @@ class MoesFingerbotAccessory {
             }, 500); // Brief delay before disconnect
           });
         }, this.pressTime);
-      });
+      };
     };
 
     // Start the sequence with a delay to ensure notifications are set up
