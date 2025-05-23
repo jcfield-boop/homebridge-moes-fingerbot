@@ -346,16 +346,16 @@ class MoesFingerbotAccessory {
             this.log(`Found ${services.length} services and ${characteristics.length} characteristics`);
             
             // Find required characteristics for Tuya BLE
-            const writeChar = characteristics.find(char => 
-              char.uuid === '2b11' || 
-              char.uuid.includes('2b11') ||
+            const writeChar = characteristics.find(char =>
+              char.uuid.replace(/^0+/, '') === '2b11' ||
+              char.uuid.toLowerCase().includes('2b11') ||
               (char.properties.includes('write') || char.properties.includes('writeWithoutResponse'))
             );
             
-            const notifyChar = characteristics.find(char => 
-              char.uuid === '2b10' || 
-              char.uuid.includes('2b10') ||
-              char.properties.includes('notify') || 
+            const notifyChar = characteristics.find(char =>
+              char.uuid.replace(/^0+/, '') === '2b10' ||
+              char.uuid.toLowerCase().includes('2b10') ||
+              char.properties.includes('notify') ||
               char.properties.includes('indicate')
             );
 
