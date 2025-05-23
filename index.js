@@ -9,7 +9,57 @@ module.exports = function(homebridge) {
   homebridge.registerAccessory('homebridge-moes-fingerbot', 'MoesFingerbot', MoesFingerbotAccessory);
 };
 
-// Simplified CRC16 utility
+// Tuya BLE Protocol Constants (from working Python code)
+const Coder = {
+  FUN_SENDER_DEVICE_INFO: 0,
+  FUN_SENDER_PAIR: 1,
+  FUN_SENDER_DPS: 2,
+  FUN_SENDER_DEVICE_STATUS: 3,
+  FUN_RECEIVE_TIME1_REQ: 32785,
+  FUN_RECEIVE_DP: 32769
+};
+
+const DpType = {
+  RAW: 0,
+  BOOLEAN: 1,
+  INT: 2,
+  STRING: 3,
+  ENUM: 4
+};
+
+// Working DP mappings from Python code
+const DpAction = {
+  ARM_DOWN_PERCENT: 9,      // Not 3!
+  ARM_UP_PERCENT: 15,       // Not 7!
+  CLICK_SUSTAIN_TIME: 10,   // Not 4!
+  TAP_ENABLE: 17,
+  MODE: 8,                  // Not 2!
+  INVERT_SWITCH: 11,
+  TOGGLE_SWITCH: 2,
+  CLICK: 101,               // Not 1!
+  PROG: 121
+};
+
+// Secret Key Manager (from Python)
+class SecretKeyManager {
+  constructor(loginKey) {
+    this.loginKey = loginKey;
+    this.keys = {
+      4: crypto.createHash('md5').update(this.loginKey).digest()
+    };
+  }
+
+  get(securityFlag) {
+    return this.keys[securityFlag] || null;
+  }
+
+  setSrand(srand) {
+    const combined = Buffer.concat([this.loginKey, srand]);
+    this.keys[5] = crypto.createHash('md5').update(combined).digest();
+  }
+}
+
+// CRC Utils (from Python)
 class CrcUtils {
   static crc16(data) {
     let crc = 0xFFFF;
@@ -27,108 +77,296 @@ class CrcUtils {
   }
 }
 
-// Simplified Tuya BLE packet builder based on working implementations
-class TuyaBLEPacket {
-  static createPacket(seqNo, cmd, data) {
-    // Create basic packet structure: [SeqNo][Cmd][Length][Data][CRC]
-    const length = data.length;
-    const packet = Buffer.alloc(4 + length + 2);
-    
-    packet.writeUInt8(seqNo, 0);
-    packet.writeUInt8(cmd, 1);
-    packet.writeUInt16BE(length, 2);
-    data.copy(packet, 4);
-    
-    // Calculate CRC for everything except the CRC itself
-    const crc = CrcUtils.crc16(packet.slice(0, 4 + length));
-    packet.writeUInt16BE(crc, 4 + length);
-    
-    return packet;
+// AES Utils (from Python)
+class AesUtils {
+  static decrypt(data, iv, key) {
+    const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+    return Buffer.concat([decipher.update(data), decipher.final()]);
   }
 
-  static encryptData(key, iv, data) {
+  static encrypt(data, iv, key) {
+    const cipher = crypto.createCipheriv('aes-128-cbc', key, iv);
+    return Buffer.concat([cipher.update(data), cipher.final()]);
+  }
+}
+
+// Tuya Data Packet (from Python)
+class TuyaDataPacket {
+  static prepareCrc(snAck, ackSn, code, inp, inpLength) {
+    const header = Buffer.alloc(12);
+    header.writeUInt32BE(snAck, 0);
+    header.writeUInt32BE(ackSn, 4);
+    header.writeUInt16BE(code, 8);
+    header.writeUInt16BE(inpLength, 10);
+    
+    const raw = Buffer.concat([header, inp]);
+    const crc = CrcUtils.crc16(raw);
+    const crcBuffer = Buffer.alloc(2);
+    crcBuffer.writeUInt16BE(crc, 0);
+    
+    return Buffer.concat([raw, crcBuffer]);
+  }
+
+  static getRandomIv() {
+    return crypto.randomBytes(16);
+  }
+
+  static encryptPacket(secretKey, securityFlag, iv, data) {
     // Pad to 16-byte boundary
     while (data.length % 16 !== 0) {
       data = Buffer.concat([data, Buffer.from([0x00])]);
     }
 
-    const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
-    cipher.setAutoPadding(false);
-    return cipher.update(data);
-  }
-
-  static decryptData(key, encryptedData) {
-    const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
-    decipher.setAutoPadding(false);
-    return decipher.update(encryptedData);
+    const encryptedData = AesUtils.encrypt(data, iv, secretKey);
+    
+    const output = Buffer.alloc(1 + 16 + encryptedData.length);
+    let offset = 0;
+    
+    output.writeUInt8(securityFlag, offset); offset += 1;
+    iv.copy(output, offset); offset += 16;
+    encryptedData.copy(output, offset);
+    
+    return output;
   }
 }
 
-// Simplified response parser
-class ResponseParser {
-  constructor(accessory) {
+// XRequest (from Python)
+class XRequest {
+  constructor(snAck, ackSn, code, securityFlag, secretKey, iv, inp) {
+    this.gattMtu = 20;
+    this.snAck = snAck;
+    this.ackSn = ackSn;
+    this.code = code;
+    this.securityFlag = securityFlag;
+    this.secretKey = secretKey;
+    this.iv = iv;
+    this.inp = inp;
+  }
+
+  pack() {
+    const data = TuyaDataPacket.prepareCrc(this.snAck, this.ackSn, this.code, this.inp, this.inp.length);
+    const encryptedData = TuyaDataPacket.encryptPacket(this.secretKey, this.securityFlag, this.iv, data);
+    
+    return this.splitPacket(2, encryptedData);
+  }
+
+  splitPacket(protocolVersion, data) {
+    const output = [];
+    let packetNumber = 0;
+    let pos = 0;
+    const length = data.length;
+    
+    while (pos < length) {
+      const packet = Buffer.alloc(this.gattMtu);
+      let offset = 0;
+      
+      // Packet number
+      packet.writeUInt8(packetNumber, offset); offset += 1;
+      
+      if (packetNumber === 0) {
+        // First packet includes length and protocol version
+        packet.writeUInt8(length, offset); offset += 1;
+        packet.writeUInt8(protocolVersion << 4, offset); offset += 1;
+      }
+      
+      // Data
+      const remainingSpace = this.gattMtu - offset;
+      const dataToWrite = Math.min(remainingSpace, length - pos);
+      data.copy(packet, offset, pos, pos + dataToWrite);
+      
+      // Create final packet with actual length
+      const finalPacket = packet.slice(0, offset + dataToWrite);
+      output.push(finalPacket);
+      
+      pos += dataToWrite;
+      packetNumber += 1;
+    }
+    
+    return output;
+  }
+}
+
+// BLE Receiver (from Python)
+class BleReceiver {
+  constructor(secretKeyManager, accessory) {
+    this.secretKeyManager = secretKeyManager;
     this.accessory = accessory;
-    this.buffer = Buffer.alloc(0);
+    this.reset();
   }
 
   reset() {
-    this.buffer = Buffer.alloc(0);
+    this.lastIndex = 0;
+    this.dataLength = 0;
+    this.currentLength = 0;
+    this.raw = Buffer.alloc(0);
+    this.version = 0;
   }
 
-  addData(data) {
-    this.buffer = Buffer.concat([this.buffer, data]);
-    this.accessory.log(`📥 Raw RX: ${data.toString('hex')}`);
-    this.accessory.log(`📥 Total buffer: ${this.buffer.toString('hex')}`);
+  unpack(arr) {
+    let i = 0;
+    let packetNumber = 0;
     
-    // Try to parse complete packets
-    return this.parsePackets();
-  }
-
-  parsePackets() {
-    const results = [];
-    
-    while (this.buffer.length >= 6) { // Minimum packet size
-      try {
-        const seqNo = this.buffer.readUInt8(0);
-        const cmd = this.buffer.readUInt8(1);
-        const length = this.buffer.readUInt16BE(2);
-        
-        this.accessory.log(`📋 Parsing: seqNo=${seqNo}, cmd=${cmd}, length=${length}`);
-        
-        if (this.buffer.length < 4 + length + 2) {
-          this.accessory.log(`📋 Incomplete packet: need ${4 + length + 2}, have ${this.buffer.length}`);
-          break; // Wait for more data
-        }
-        
-        const payload = this.buffer.slice(4, 4 + length);
-        const receivedCrc = this.buffer.readUInt16BE(4 + length);
-        
-        // Verify CRC
-        const calculatedCrc = CrcUtils.crc16(this.buffer.slice(0, 4 + length));
-        if (receivedCrc !== calculatedCrc) {
-          this.accessory.log(`❌ CRC mismatch: received=${receivedCrc}, calculated=${calculatedCrc}`);
-          this.buffer = this.buffer.slice(1); // Skip one byte and try again
-          continue;
-        }
-        
-        this.accessory.log(`✅ Valid packet: seqNo=${seqNo}, cmd=${cmd}, payload=${payload.toString('hex')}`);
-        
-        results.push({
-          seqNo,
-          cmd,
-          payload
-        });
-        
-        // Remove processed packet from buffer
-        this.buffer = this.buffer.slice(4 + length + 2);
-        
-      } catch (error) {
-        this.accessory.log(`❌ Parse error: ${error.message}`);
-        this.buffer = this.buffer.slice(1); // Skip one byte and try again
+    // Parse packet number
+    while (i < 4 && i < arr.length) {
+      const b = arr[i];
+      packetNumber |= (b & 255) << (i * 7);
+      if (((b >> 7) & 1) === 0) {
+        break;
       }
+      i++;
     }
     
-    return results;
+    let pos = i + 1;
+    
+    if (packetNumber === 0) {
+      // First packet - parse length and version
+      this.dataLength = 0;
+      
+      while (pos <= i + 4 && pos < arr.length) {
+        const b2 = arr[pos];
+        this.dataLength |= (b2 & 255) << (((pos - 1) - i) * 7);
+        if (((b2 >> 7) & 1) === 0) {
+          break;
+        }
+        pos++;
+      }
+      
+      this.currentLength = 0;
+      this.lastIndex = 0;
+      
+      if (pos === i + 5 || arr.length < pos + 2) {
+        return 2; // Error
+      }
+      
+      this.raw = Buffer.alloc(0);
+      pos += 1;
+      this.version = (arr[pos] >> 4) & 15;
+      pos += 1;
+    }
+    
+    if (packetNumber === 0 || packetNumber > this.lastIndex) {
+      const data = arr.slice(pos);
+      this.currentLength += data.length;
+      this.lastIndex = packetNumber;
+      this.raw = Buffer.concat([this.raw, data]);
+      
+      if (this.currentLength < this.dataLength) {
+        return 1; // Need more data
+      }
+      
+      return this.currentLength === this.dataLength ? 0 : 3; // Complete or error
+    }
+    
+    return 1; // Need more data
+  }
+
+  parseDataReceived(arr) {
+    const status = this.unpack(arr);
+    
+    if (status === 0) {
+      // Complete packet received
+      const securityFlag = this.raw[0];
+      const secretKey = this.secretKeyManager.get(securityFlag);
+      
+      if (!secretKey) {
+        this.accessory.log(`❌ No secret key for security flag: ${securityFlag}`);
+        return null;
+      }
+      
+      const result = this.parseResponse(this.raw, this.version, secretKey);
+      this.reset(); // Reset for next packet
+      return result;
+    }
+    
+    return null; // Incomplete packet
+  }
+
+  parseResponse(raw, version, secretKey) {
+    try {
+      const securityFlag = raw[0];
+      const iv = raw.slice(1, 17);
+      const encryptedData = raw.slice(17);
+      
+      // Decrypt
+      const decryptedData = AesUtils.decrypt(encryptedData, iv, secretKey);
+      
+      // Parse decrypted data
+      const sn = decryptedData.readUInt32BE(0);
+      const snAck = decryptedData.readUInt32BE(4);
+      const code = decryptedData.readUInt16BE(8);
+      const length = decryptedData.readUInt16BE(10);
+      const rawData = decryptedData.slice(12, 12 + length);
+      
+      this.accessory.log(`📋 Decrypted: sn=${sn}, snAck=${snAck}, code=${code}, length=${length}`);
+      
+      let resp = null;
+      
+      if (code === Coder.FUN_SENDER_DEVICE_INFO) {
+        // Device info response
+        resp = this.parseDeviceInfoResponse(rawData);
+      } else if (code === Coder.FUN_SENDER_PAIR) {
+        // Pair response
+        resp = { success: true };
+      } else if (code === Coder.FUN_SENDER_DPS) {
+        // DP response
+        resp = this.parseDPResponse(rawData);
+      }
+      
+      return {
+        raw,
+        version,
+        securityFlag,
+        code,
+        resp
+      };
+      
+    } catch (error) {
+      this.accessory.log(`❌ Response parsing failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  parseDeviceInfoResponse(rawData) {
+    if (rawData.length < 46) {
+      return { success: false };
+    }
+    
+    try {
+      const deviceVersionMajor = rawData.readUInt8(0);
+      const deviceVersionMinor = rawData.readUInt8(1);
+      const protocolVersionMajor = rawData.readUInt8(2);
+      const protocolVersionMinor = rawData.readUInt8(3);
+      const flag = rawData.readUInt8(4);
+      const isBind = rawData.readUInt8(5);
+      const srand = rawData.slice(6, 12);
+      
+      const deviceVersion = `${deviceVersionMajor}.${deviceVersionMinor}`;
+      const protocolVersion = `${protocolVersionMajor}.${protocolVersionMinor}`;
+      
+      const protocolNumber = protocolVersionMajor * 10 + protocolVersionMinor;
+      if (protocolNumber < 20) {
+        return { success: false };
+      }
+      
+      return {
+        success: true,
+        device_version: deviceVersion,
+        protocol_version: protocolVersion,
+        flag,
+        is_bind: isBind,
+        srand
+      };
+      
+    } catch (error) {
+      this.accessory.log(`❌ Device info parsing failed: ${error.message}`);
+      return { success: false };
+    }
+  }
+
+  parseDPResponse(rawData) {
+    this.accessory.log(`📦 DP Response data: ${rawData.toString('hex')}`);
+    // For now, just log the response
+    return { dps: {} };
   }
 }
 
@@ -142,15 +380,22 @@ class MoesFingerbotAccessory {
     this.deviceId = config.deviceId;
     this.localKey = config.localKey;
     
-    this.log(`🔧 Configuration: deviceId=${this.deviceId}, address=${this.address}, localKey=${this.localKey ? `${this.localKey.length} chars` : 'MISSING'}`);
+    this.log(`🔧 Python-based Configuration: deviceId=${this.deviceId}, address=${this.address}`);
     
     if (!this.deviceId || !this.localKey || !this.address) {
       this.log('❌ ERROR: deviceId, localKey, and address are all required');
-      throw new Error('Missing required configuration');
+      throw new Error('Missing required Tuya BLE credentials');
     }
 
-    // Simplified key generation based on working implementations
-    this.generateKeys();
+    // Initialize like Python code
+    this.uuid = Buffer.from(this.deviceId, 'utf8');
+    this.devId = Buffer.from(this.deviceId, 'utf8');
+    this.loginKey = Buffer.from(this.localKey.slice(0, 6), 'utf8');
+    
+    this.log(`🔑 Login key (first 6 chars): "${this.localKey.slice(0, 6)}" -> ${this.loginKey.toString('hex')}`);
+    
+    this.secretKeyManager = new SecretKeyManager(this.loginKey);
+    this.bleReceiver = new BleReceiver(this.secretKeyManager, this);
     
     // Device state
     this.isOn = false;
@@ -159,9 +404,7 @@ class MoesFingerbotAccessory {
     this.currentPeripheral = null;
     this.bluetoothReady = false;
     this.operationInProgress = false;
-    this.seqNo = 0;
-    
-    this.responseParser = new ResponseParser(this);
+    this.snAck = 0;
     
     // Setup HomeKit services
     this.switchService = new Service.Switch(this.name);
@@ -178,24 +421,14 @@ class MoesFingerbotAccessory {
     // Setup Bluetooth
     this.setupBluetoothEvents();
     
-    // Auto-test on startup if Bluetooth is ready
+    // Auto-test on startup
     if (noble.state === 'poweredOn') {
       this.bluetoothReady = true;
-      this.log('Starting automatic communication test in 2 seconds...');
+      this.log('Starting Python-based protocol test in 3 seconds...');
       setTimeout(() => {
-        this.testBatteryRead();
-      }, 2000);
+        this.testPythonProtocol();
+      }, 3000);
     }
-  }
-
-  generateKeys() {
-    // Simplified key generation based on working implementations
-    this.loginKey = Buffer.from(this.localKey.slice(0, 6), 'utf8');
-    this.log(`🔑 Login key: "${this.localKey.slice(0, 6)}" -> ${this.loginKey.toString('hex')}`);
-    
-    // Basic encryption key from local key
-    this.encryptionKey = crypto.createHash('md5').update(Buffer.from(this.localKey, 'utf8')).digest();
-    this.log(`🔐 Encryption key: ${this.encryptionKey.toString('hex')}`);
   }
 
   setupBluetoothEvents() {
@@ -216,22 +449,21 @@ class MoesFingerbotAccessory {
   }
 
   getOn(callback) {
-    callback(null, false); // Always return false since this is just a momentary switch
+    callback(null, false);
   }
 
   setOn(value, callback) {
     if (value) {
-      this.log('🔴 Switch activated - running communication test...');
-      this.testBatteryRead()
+      this.log('🔴 Switch activated - executing fingerbot press...');
+      this.pressFingerbotPython()
         .then(() => {
           callback(null);
-          // Reset switch to off after a moment
           setTimeout(() => {
             this.switchService.updateCharacteristic(Characteristic.On, false);
           }, 1000);
         })
         .catch(error => {
-          this.log(`❌ Test failed: ${error.message}`);
+          this.log(`❌ Press failed: ${error.message}`);
           callback(error);
         });
     } else {
@@ -244,161 +476,243 @@ class MoesFingerbotAccessory {
     callback(null, level);
   }
 
-  async testBatteryRead() {
+  nextSnAck() {
+    this.snAck += 1;
+    return this.snAck;
+  }
+
+  resetSnAck() {
+    this.snAck = 0;
+  }
+
+  async testPythonProtocol() {
     if (this.operationInProgress) {
-      this.log('⚠️ Communication test already in progress');
+      this.log('⚠️ Test already in progress');
       return;
     }
 
     try {
       this.operationInProgress = true;
-      this.log('🔋 Starting battery communication test...');
+      this.log('🐍 Testing Python-based Tuya BLE protocol...');
       
       const connectionInfo = await this.scanAndConnect();
-      await this.performSimpleBatteryRead(connectionInfo);
+      await this.performPythonProtocolSequence(connectionInfo);
       
-      this.log('✅ Battery communication test completed');
+      this.log('✅ Python protocol test completed');
       
     } catch (error) {
-      this.log(`❌ Battery communication test failed: ${error.message}`);
+      this.log(`❌ Python protocol test failed: ${error.message}`);
     } finally {
       this.operationInProgress = false;
       this.forceDisconnect();
     }
   }
 
-  async scanAndConnect() {
-    return new Promise((resolve, reject) => {
+  async pressFingerbotPython() {
+    if (this.operationInProgress) {
+      this.log('⚠️ Operation in progress');
+      return;
+    }
+
+    try {
+      this.operationInProgress = true;
+      this.log('🤖 Executing fingerbot press via Python protocol...');
+      
+      const connectionInfo = await this.scanAndConnect();
+      await this.performPythonProtocolSequence(connectionInfo, true);
+      
+      this.log('✅ Fingerbot press completed');
+      
+    } catch (error) {
+      this.log(`❌ Fingerbot press failed: ${error.message}`);
+      throw error;
+    } finally {
+      this.operationInProgress = false;
       this.forceDisconnect();
-      
-      let scanTimeout = null;
-      let found = false;
-
-      const discoverHandler = async (peripheral) => {
-        if (peripheral.address === this.address && !found) {
-          found = true;
-          this.log(`📡 Found device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
-          
-          clearTimeout(scanTimeout);
-          noble.stopScanning();
-          noble.removeListener('discover', discoverHandler);
-
-          try {
-            const connectionInfo = await this.connectToPeripheral(peripheral);
-            resolve(connectionInfo);
-          } catch (error) {
-            reject(error);
-          }
-        }
-      };
-
-      noble.on('discover', discoverHandler);
-      
-      this.log('🔍 Scanning for device...');
-      noble.startScanning([], true);
-
-      scanTimeout = setTimeout(() => {
-        this.log('⏰ Scan timeout');
-        noble.stopScanning();
-        noble.removeListener('discover', discoverHandler);
-        reject(new Error('Device not found'));
-      }, 15000);
-    });
+    }
   }
 
-  async connectToPeripheral(peripheral) {
-    return new Promise((resolve, reject) => {
-      this.currentPeripheral = peripheral;
-      
-      const connectTimeout = setTimeout(() => {
-        this.log('⏰ Connection timeout');
-        reject(new Error('Connection timeout'));
-      }, 20000);
-
-      this.log('🔌 Connecting...');
-      peripheral.connect((error) => {
-        clearTimeout(connectTimeout);
-        
-        if (error) {
-          this.log(`❌ Connection error: ${error.message}`);
-          return reject(error);
-        }
-
-        this.log('✅ Connected, discovering services...');
-        
-        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-          if (error) {
-            this.log(`❌ Service discovery error: ${error.message}`);
-            return reject(error);
-          }
-
-          this.log(`📋 Found ${characteristics.length} characteristics`);
-          
-          // Find Tuya BLE characteristics
-          let writeChar = characteristics.find(char => {
-            const uuid = char.uuid.toLowerCase();
-            return uuid.includes('2b11') || uuid === '00002b11-0000-1000-8000-00805f9b34fb';
-          });
-          
-          let notifyChar = characteristics.find(char => {
-            const uuid = char.uuid.toLowerCase();
-            return uuid.includes('2b10') || uuid === '00002b10-0000-1000-8000-00805f9b34fb';
-          });
-
-          this.log(`🔍 Write char: ${writeChar ? 'FOUND' : 'MISSING'}`);
-          this.log(`🔍 Notify char: ${notifyChar ? 'FOUND' : 'MISSING'}`);
-
-          if (!writeChar || !notifyChar) {
-            return reject(new Error('Required BLE characteristics not found'));
-          }
-
-          resolve({ peripheral, writeChar, notifyChar });
-        });
-      });
-    });
-  }
-
-  async performSimpleBatteryRead(connectionInfo) {
+  async performPythonProtocolSequence(connectionInfo, executePress = false) {
     const { peripheral, writeChar, notifyChar } = connectionInfo;
     
     return new Promise(async (resolve, reject) => {
-      this.responseParser.reset();
-      this.seqNo = 1;
+      let sequenceStep = 'device_info';
+      let sequenceTimeout = null;
+      let pressSent = false;
       
-      // Setup notifications
+      this.bleReceiver.reset();
+      this.resetSnAck();
+      
+      // Setup notification handler (like Python handle_notification)
       const notificationHandler = (data) => {
-        const packets = this.responseParser.addData(data);
+        this.log(`📥 RX: ${data.toString('hex')}`);
         
-        for (const packet of packets) {
-          this.log(`📦 Received packet: cmd=${packet.cmd}, payload=${packet.payload.toString('hex')}`);
-          
-          if (packet.cmd === 0x02) { // Assume cmd 2 is status response
-            this.parseBatteryFromPayload(packet.payload);
+        const result = this.bleReceiver.parseDataReceived(data);
+        if (!result) {
+          return; // Incomplete packet
+        }
+        
+        this.log(`📋 Response: code=${result.code}, step=${sequenceStep}`);
+        
+        if (sequenceStep === 'device_info' && result.code === Coder.FUN_SENDER_DEVICE_INFO) {
+          // Device info response - like Python code
+          if (result.resp && result.resp.success) {
+            this.log(`✅ Device info: version=${result.resp.device_version}, protocol=${result.resp.protocol_version}`);
+            this.secretKeyManager.setSrand(result.resp.srand);
+            
+            // Send pair request
+            sequenceStep = 'pairing';
+            this.log('📤 Sending pair request...');
+            setTimeout(() => this.sendPairRequest(writeChar), 200);
+          } else {
+            reject(new Error('Device info request failed'));
           }
+        } else if (sequenceStep === 'pairing' && result.code === Coder.FUN_SENDER_PAIR) {
+          // Pairing response - like Python code
+          this.log(`✅ Pairing successful`);
           
-          // For now, resolve after any response
+          if (executePress && !pressSent) {
+            // Send fingerbot press (like Python send_dps)
+            sequenceStep = 'fingerbot_press';
+            pressSent = true;
+            this.log('📤 Sending fingerbot press...');
+            setTimeout(() => this.sendFingerbotDps(writeChar), 200);
+          } else {
+            // Just complete the test
+            clearTimeout(sequenceTimeout);
+            resolve();
+          }
+        } else if (sequenceStep === 'fingerbot_press' && result.code === Coder.FUN_SENDER_DPS) {
+          // DP response
+          this.log(`✅ Fingerbot press command acknowledged`);
+          clearTimeout(sequenceTimeout);
           setTimeout(() => resolve(), 1000);
         }
       };
 
       try {
-        // Enable notifications
+        // Subscribe to notifications
         await this.setupNotifications(notifyChar, notificationHandler);
         
-        // Send simple status request
-        this.log('📤 Sending status request...');
-        await this.sendStatusRequest(writeChar);
+        // Start sequence with device info request (like Python)
+        this.log('📤 Sending device info request...');
+        this.sendDeviceInfoRequest(writeChar);
         
-        // Timeout if no response
-        setTimeout(() => {
-          this.log('⏰ Response timeout');
-          reject(new Error('No response received'));
-        }, 10000);
+        // Set overall timeout
+        sequenceTimeout = setTimeout(() => {
+          this.log(`⏰ Python protocol timeout at step: ${sequenceStep}`);
+          reject(new Error(`Python protocol timeout at ${sequenceStep}`));
+        }, 30000);
         
       } catch (error) {
         reject(error);
       }
     });
+  }
+
+  // Device info request (like Python)
+  sendDeviceInfoRequest(writeChar) {
+    const inp = Buffer.alloc(0);
+    const iv = TuyaDataPacket.getRandomIv();
+    const securityFlag = 4;
+    const secretKey = this.secretKeyManager.get(securityFlag);
+    const snAck = this.nextSnAck();
+    
+    const request = new XRequest(snAck, 0, Coder.FUN_SENDER_DEVICE_INFO, securityFlag, secretKey, iv, inp);
+    this.sendRequest(writeChar, request);
+  }
+
+  // Pair request (like Python)
+  sendPairRequest(writeChar) {
+    const securityFlag = 5;
+    const secretKey = this.secretKeyManager.get(securityFlag);
+    const iv = TuyaDataPacket.getRandomIv();
+    
+    const inp = Buffer.alloc(16 + 6 + 22);
+    let offset = 0;
+    
+    // UUID (16 bytes)
+    this.uuid.copy(inp, offset, 0, Math.min(this.uuid.length, 16));
+    offset += 16;
+    
+    // Login key (6 bytes)
+    this.loginKey.copy(inp, offset);
+    offset += 6;
+    
+    // Device ID (22 bytes, padded with zeros)
+    this.devId.copy(inp, offset, 0, Math.min(this.devId.length, 22));
+    
+    const snAck = this.nextSnAck();
+    const request = new XRequest(snAck, 0, Coder.FUN_SENDER_PAIR, securityFlag, secretKey, iv, inp);
+    
+    this.sendRequest(writeChar, request);
+  }
+
+  // Send DPs (exactly like Python send_dps)
+  sendFingerbotDps(writeChar) {
+    const securityFlag = 5;
+    const secretKey = this.secretKeyManager.get(securityFlag);
+    const iv = TuyaDataPacket.getRandomIv();
+    
+    // Exact DPs from working Python code
+    const dps = [
+      [DpAction.MODE, DpType.ENUM, 0],                    // Mode = click
+      [DpAction.ARM_DOWN_PERCENT, DpType.INT, 80],        // Down 80%
+      [DpAction.ARM_UP_PERCENT, DpType.INT, 0],           // Up 0%
+      [DpAction.CLICK_SUSTAIN_TIME, DpType.INT, 0],       // Sustain 0s
+      [DpAction.CLICK, DpType.BOOLEAN, true],             // Trigger click
+    ];
+    
+    let raw = Buffer.alloc(0);
+    
+    for (const dp of dps) {
+      const [dpId, dpType, dpValue] = dp;
+      
+      // DP header: [DP_ID][DP_TYPE]
+      const header = Buffer.alloc(2);
+      header.writeUInt8(dpId, 0);
+      header.writeUInt8(dpType, 1);
+      
+      let valueBuffer;
+      
+      if (dpType === DpType.BOOLEAN) {
+        const length = 1;
+        const val = dpValue ? 1 : 0;
+        valueBuffer = Buffer.alloc(2);
+        valueBuffer.writeUInt8(length, 0);
+        valueBuffer.writeUInt8(val, 1);
+      } else if (dpType === DpType.INT) {
+        const length = 4;
+        valueBuffer = Buffer.alloc(5);
+        valueBuffer.writeUInt8(length, 0);
+        valueBuffer.writeUInt32BE(dpValue, 1);
+      } else if (dpType === DpType.ENUM) {
+        const length = 1;
+        valueBuffer = Buffer.alloc(2);
+        valueBuffer.writeUInt8(length, 0);
+        valueBuffer.writeUInt8(dpValue, 1);
+      } else {
+        continue;
+      }
+      
+      raw = Buffer.concat([raw, header, valueBuffer]);
+    }
+    
+    this.log(`📦 DP payload: ${raw.toString('hex')}`);
+    
+    const snAck = this.nextSnAck();
+    const request = new XRequest(snAck, 0, Coder.FUN_SENDER_DPS, securityFlag, secretKey, iv, raw);
+    
+    this.sendRequest(writeChar, request);
+  }
+
+  sendRequest(writeChar, xRequest) {
+    const packets = xRequest.pack();
+    
+    for (const packet of packets) {
+      this.log(`📤 TX: ${packet.toString('hex')}`);
+      this.writeCharacteristic(writeChar, packet);
+    }
   }
 
   async setupNotifications(notifyChar, handler) {
@@ -416,87 +730,83 @@ class MoesFingerbotAccessory {
     });
   }
 
-  async sendStatusRequest(writeChar) {
-    // Try multiple simple approaches
-    const approaches = [
-      { name: 'Raw status', data: Buffer.from([0x01, 0x02]) },
-      { name: 'DP query', data: Buffer.from([0x01, 0x02, 0x00, 0x00]) },
-      { name: 'Battery query', data: Buffer.from([0x06]) }, // DP6 is battery
-    ];
-
-    for (const approach of approaches) {
-      this.log(`📤 Trying ${approach.name}: ${approach.data.toString('hex')}`);
-      
-      // Create packet
-      const packet = TuyaBLEPacket.createPacket(this.seqNo++, 0x02, approach.data);
-      this.log(`📤 TX packet: ${packet.toString('hex')}`);
-      
-      // Send packet (split if needed for MTU)
-      await this.writeCharacteristic(writeChar, packet);
-      
-      // Wait between attempts
-      await this.delay(2000);
-    }
-  }
-
-  parseBatteryFromPayload(payload) {
-    this.log(`📊 Parsing battery from: ${payload.toString('hex')}`);
-    
-    // Try simple approaches to find battery level
-    for (let i = 0; i < payload.length; i++) {
-      const value = payload.readUInt8(i);
-      if (value >= 0 && value <= 100) {
-        this.log(`🔋 Potential battery level at offset ${i}: ${value}%`);
-        this.batteryLevel = value;
-        this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, value);
-      }
-    }
-    
-    // Try 16-bit values
-    for (let i = 0; i < payload.length - 1; i++) {
-      const value = payload.readUInt16BE(i);
-      if (value >= 0 && value <= 100) {
-        this.log(`🔋 Potential battery level (16-bit) at offset ${i}: ${value}%`);
-        this.batteryLevel = value;
-        this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, value);
-      }
-    }
-  }
-
   async writeCharacteristic(characteristic, data) {
     return new Promise((resolve, reject) => {
-      // Split packet if larger than MTU (20 bytes)
-      const mtu = 20;
-      if (data.length <= mtu) {
-        characteristic.write(data, false, (error) => {
-          if (error) {
-            this.log(`❌ Write error: ${error.message}`);
+      characteristic.write(data, false, (error) => {
+        if (error) {
+          this.log(`❌ Write error: ${error.message}`);
+          reject(error);
+        } else {
+          setTimeout(() => resolve(), 20);
+        }
+      });
+    });
+  }
+
+  async scanAndConnect() {
+    return new Promise((resolve, reject) => {
+      this.forceDisconnect();
+      
+      const discoverHandler = async (peripheral) => {
+        if (peripheral.address === this.address) {
+          this.log(`📡 Found device: ${peripheral.address} (RSSI: ${peripheral.rssi})`);
+          
+          noble.stopScanning();
+          noble.removeListener('discover', discoverHandler);
+
+          try {
+            const connectionInfo = await this.connectToPeripheral(peripheral);
+            resolve(connectionInfo);
+          } catch (error) {
             reject(error);
-          } else {
-            resolve();
           }
+        }
+      };
+
+      noble.on('discover', discoverHandler);
+      this.log('🔍 Scanning for device...');
+      noble.startScanning([], true);
+
+      setTimeout(() => {
+        noble.stopScanning();
+        noble.removeListener('discover', discoverHandler);
+        reject(new Error('Device not found'));
+      }, 15000);
+    });
+  }
+
+  async connectToPeripheral(peripheral) {
+    return new Promise((resolve, reject) => {
+      this.currentPeripheral = peripheral;
+      
+      peripheral.connect((error) => {
+        if (error) {
+          return reject(error);
+        }
+
+        this.log('✅ Connected, discovering services...');
+        
+        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
+          if (error) {
+            return reject(error);
+          }
+
+          // Find Tuya BLE characteristics (from Python NOTIF_UUID and CHAR_UUID)
+          const writeChar = characteristics.find(char => 
+            char.uuid.toLowerCase() === '00002b11-0000-1000-8000-00805f9b34fb'
+          );
+          const notifyChar = characteristics.find(char => 
+            char.uuid.toLowerCase() === '00002b10-0000-1000-8000-00805f9b34fb'
+          );
+
+          if (!writeChar || !notifyChar) {
+            return reject(new Error('Required Tuya BLE characteristics not found'));
+          }
+
+          this.log('✅ Found Tuya BLE characteristics');
+          resolve({ peripheral, writeChar, notifyChar });
         });
-      } else {
-        // Split into chunks
-        let offset = 0;
-        const writeNext = () => {
-          const chunk = data.slice(offset, offset + mtu);
-          characteristic.write(chunk, false, (error) => {
-            if (error) {
-              this.log(`❌ Write error: ${error.message}`);
-              reject(error);
-            } else {
-              offset += mtu;
-              if (offset < data.length) {
-                setTimeout(writeNext, 50);
-              } else {
-                resolve();
-              }
-            }
-          });
-        };
-        writeNext();
-      }
+      });
     });
   }
 
@@ -505,15 +815,13 @@ class MoesFingerbotAccessory {
   }
 
   forceDisconnect() {
-    this.log('🔌 Disconnecting...');
-    
     try {
       if (noble.state === 'poweredOn') {
         noble.stopScanning();
       }
       noble.removeAllListeners('discover');
     } catch (error) {
-      this.log(`Scan cleanup error: ${error.message}`);
+      // Ignore cleanup errors
     }
     
     if (this.currentPeripheral) {
@@ -523,7 +831,7 @@ class MoesFingerbotAccessory {
         }
         this.currentPeripheral.removeAllListeners();
       } catch (error) {
-        this.log(`Disconnect error: ${error.message}`);
+        // Ignore cleanup errors
       }
       this.currentPeripheral = null;
     }
