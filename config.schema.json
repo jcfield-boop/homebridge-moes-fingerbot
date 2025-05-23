@@ -1,188 +1,89 @@
 {
-  "pluginAlias": "MoesFingerbot",
+  "pluginAlias": "homebridge-moes-fingerbot-test",
   "pluginType": "accessory",
   "singular": false,
-  "headerDisplay": "Homebridge plugin for MOES Fingerbot devices. Device ID and Local Key are required for Tuya BLE communication.",
-  "footerDisplay": "For help finding your device address, use a Bluetooth scanner app. Use tuya-local-key-extractor or similar tools to get your Device ID and Local Key.",
+  "headerDisplay": "MOES Fingerbot BLE Test Plugin - Simplified version for testing basic communication",
+  "footerDisplay": "For support please visit: https://github.com/jcfield-boop/homebridge-moes-fingerbot",
   "schema": {
     "type": "object",
     "properties": {
+      "accessory": {
+        "title": "Accessory",
+        "type": "string",
+        "const": "MoesFingerbotTest",
+        "readOnly": true
+      },
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "MOES Fingerbot",
-        "required": true,
-        "description": "The name of this accessory as it will appear in HomeKit"
-      },
-      "address": {
-        "title": "Bluetooth Address",
-        "type": "string",
-        "required": true,
-        "pattern": "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$",
-        "description": "The Bluetooth MAC address of your Fingerbot device (format: XX:XX:XX:XX:XX:XX)"
+        "default": "MOES Fingerbot Test",
+        "minLength": 1,
+        "description": "The name of your fingerbot device as it will appear in HomeKit"
       },
       "deviceId": {
         "title": "Device ID",
         "type": "string",
         "required": true,
-        "description": "Tuya device ID (required for encrypted BLE communication)"
+        "minLength": 1,
+        "description": "Tuya device ID (obtained from Tuya IoT platform or app extraction)",
+        "placeholder": "eb4507waxajlio9q"
       },
       "localKey": {
         "title": "Local Key",
         "type": "string",
         "required": true,
-        "description": "Tuya local encryption key (required for encrypted BLE communication)"
+        "minLength": 1,
+        "description": "Tuya local encryption key (obtained from Tuya IoT platform or app extraction)",
+        "placeholder": "j^G+4Sx7=NVKrq0'"
       },
-      "pressTime": {
-        "title": "Press Duration",
-        "type": "integer",
-        "default": 3000,
-        "minimum": 500,
-        "maximum": 10000,
-        "description": "How long the button stays 'pressed' in HomeKit (milliseconds)"
-      },
-      "advanced": {
-        "title": "Advanced Settings",
-        "type": "object",
-        "expandable": true,
-        "expanded": false,
-        "properties": {
-          "scanDuration": {
-            "title": "Scan Duration",
-            "type": "integer",
-            "default": 5000,
-            "minimum": 1000,
-            "maximum": 30000,
-            "description": "How long to scan for the device (milliseconds)"
-          },
-          "scanRetries": {
-            "title": "Scan Retries",
-            "type": "integer",
-            "default": 3,
-            "minimum": 1,
-            "maximum": 10,
-            "description": "Number of scan attempts before giving up"
-          },
-          "scanRetryCooldown": {
-            "title": "Retry Cooldown",
-            "type": "integer",
-            "default": 1000,
-            "minimum": 500,
-            "maximum": 10000,
-            "description": "Delay between scan retries (milliseconds)"
-          },
-          "batteryCheckInterval": {
-            "title": "Battery Check Interval",
-            "type": "integer",
-            "default": 60,
-            "minimum": 1,
-            "maximum": 1440,
-            "description": "How often to check battery level (minutes)"
-          }
-        }
+      "address": {
+        "title": "BLE Address",
+        "type": "string",
+        "required": true,
+        "pattern": "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$",
+        "description": "Bluetooth MAC address of the fingerbot device",
+        "placeholder": "dc:23:51:b7:71:33"
       }
     },
-    "required": ["name", "address", "deviceId", "localKey"]
+    "required": [
+      "accessory",
+      "name", 
+      "deviceId",
+      "localKey",
+      "address"
+    ]
   },
   "layout": [
     {
       "type": "section",
-      "title": "Basic Configuration",
-      "expandable": false,
+      "title": "Device Information",
+      "expandable": true,
+      "expanded": true,
       "items": [
-        "name",
+        "name"
+      ]
+    },
+    {
+      "type": "section", 
+      "title": "Tuya BLE Configuration",
+      "expandable": true,
+      "expanded": true,
+      "items": [
+        "deviceId",
+        "localKey",
         "address"
       ]
     },
     {
       "type": "section",
-      "title": "Tuya Authentication",
-      "expandable": false,
-      "items": [
-        {
-          "type": "help",
-          "helpvalue": "<em>These credentials are required for Tuya BLE communication. Use tuya-local-key-extractor or similar tools to obtain them.</em>"
-        },
-        "deviceId",
-        "localKey"
-      ]
-    },
-    {
-      "type": "section",
-      "title": "Button Settings",
-      "expandable": false,
-      "items": [
-        "pressTime"
-      ]
-    },
-    {
-      "type": "section", 
-      "title": "Advanced Settings",
+      "title": "Setup Instructions",
       "expandable": true,
       "expanded": false,
       "items": [
         {
           "type": "help",
-          "helpvalue": "<em>These settings are optional and only needed for troubleshooting connection issues.</em>"
-        },
-        {
-          "type": "section",
-          "title": "Scanning Options",
-          "expandable": true,
-          "expanded": false,
-          "items": [
-            "advanced.scanDuration",
-            "advanced.scanRetries", 
-            "advanced.scanRetryCooldown"
-          ]
-        },
-        {
-          "type": "section",
-          "title": "Battery Monitoring",
-          "expandable": true,
-          "expanded": false,
-          "items": [
-            "advanced.batteryCheckInterval"
-          ]
+          "helpvalue": "<h5>How to get Device ID and Local Key:</h5><ol><li>Pair your fingerbot with the Tuya Smart Life app</li><li>Use <a href='https://github.com/tuya-cloudcutter/tuya-cloudcutter'>tuya-cloudcutter</a> or <a href='https://github.com/redphx/tuya-local-key-extractor'>tuya-local-key-extractor</a></li><li>Alternative: Set up Tuya IoT platform account and link your devices</li></ol><h5>How to find BLE Address:</h5><ol><li>On Linux: <code>sudo bluetoothctl</code> then <code>scan on</code></li><li>On macOS: Use Bluetooth Explorer or similar tool</li><li>On Windows: Use Device Manager or PowerShell bluetooth commands</li></ol><h5>Test Purpose:</h5><p>This test version uses simplified BLE communication to verify basic connectivity and debug protocol issues. Check Homebridge logs for detailed communication debugging.</p>"
         }
-      ]
-    }
-  ],
-  "form": [
-    "name",
-    "address",
-    {
-      "type": "fieldset",
-      "title": "Tuya Authentication (Required)",
-      "expandable": false,
-      "items": [
-        {
-          "type": "help",
-          "helpvalue": "These credentials are required for encrypted BLE communication with your Fingerbot device."
-        },
-        "deviceId",
-        "localKey"
-      ]
-    },
-    "pressTime",
-    {
-      "type": "fieldset", 
-      "title": "Connection Settings",
-      "expandable": true,
-      "expanded": false,
-      "items": [
-        "advanced.scanDuration",
-        "advanced.scanRetries",
-        "advanced.scanRetryCooldown"
-      ]
-    },
-    {
-      "type": "fieldset",
-      "title": "Battery Settings", 
-      "expandable": true,
-      "expanded": false,
-      "items": [
-        "advanced.batteryCheckInterval"
       ]
     }
   ]
