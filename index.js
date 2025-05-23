@@ -525,43 +525,88 @@ class MoesFingerbotAccessory {
   }
 
   async pressButton() {
-    try {
-      this.canPerformBLEOperation();
-      this.operationInProgress = true;
-      
-      this.log('🔴 Activating Fingerbot...');
-      const connectionInfo = await this.scanAndConnect();
-      await this.performTuyaBLESequence(connectionInfo, 'press');
-      this.log('✅ Button press completed successfully');
-    } catch (error) {
-      this.log(`❌ Button press failed: ${error.message}`);
-      throw error;
-    } finally {
-      this.operationInProgress = false;
-      this.forceDisconnect();
+    let retryCount = 0;
+    const maxRetries = 2;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        this.canPerformBLEOperation();
+        this.operationInProgress = true;
+        
+        if (retryCount > 0) {
+          this.log(`🔄 Retry attempt ${retryCount}/${maxRetries}`);
+        }
+        
+        this.log('🔴 Activating Fingerbot...');
+        const connectionInfo = await this.scanAndConnect();
+        await this.performTuyaBLESequence(connectionInfo, 'press');
+        this.log('✅ Button press completed successfully');
+        return; // Success - exit retry loop
+        
+      } catch (error) {
+        this.log(`❌ Button press failed: ${error.message}`);
+        
+        // Retry for connection-related issues
+        if ((error.message.includes('disconnected') || error.message.includes('timeout')) && retryCount < maxRetries) {
+          retryCount++;
+          this.operationInProgress = false;
+          this.forceDisconnect();
+          this.log(`⏳ Waiting 3 seconds before retry...`);
+          await this.delay(3000);
+          continue;
+        }
+        
+        throw error; // Don't retry for other errors
+      } finally {
+        this.operationInProgress = false;
+        this.forceDisconnect();
+      }
     }
   }
 
   async updateBatteryLevel() {
-    try {
-      this.canPerformBLEOperation();
-      this.operationInProgress = true;
-      
-      this.log('🔋 Checking battery level...');
-      const connectionInfo = await this.scanAndConnect();
-      await this.performTuyaBLESequence(connectionInfo, 'battery');
-      
-      if (this.batteryLevel >= 0) {
-        this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, this.batteryLevel);
-        this.log(`Battery level: ${this.batteryLevel}%`);
-      } else {
-        this.log('Could not read battery level');
+    let retryCount = 0;
+    const maxRetries = 2;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        this.canPerformBLEOperation();
+        this.operationInProgress = true;
+        
+        if (retryCount > 0) {
+          this.log(`🔄 Battery check retry ${retryCount}/${maxRetries}`);
+        }
+        
+        this.log('🔋 Checking battery level...');
+        const connectionInfo = await this.scanAndConnect();
+        await this.performTuyaBLESequence(connectionInfo, 'battery');
+        
+        if (this.batteryLevel >= 0) {
+          this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, this.batteryLevel);
+          this.log(`Battery level: ${this.batteryLevel}%`);
+        } else {
+          this.log('Could not read battery level');
+        }
+        return; // Success
+        
+      } catch (error) {
+        this.log(`Battery check failed: ${error.message}`);
+        
+        if ((error.message.includes('disconnected') || error.message.includes('timeout')) && retryCount < maxRetries) {
+          retryCount++;
+          this.operationInProgress = false;
+          this.forceDisconnect();
+          await this.delay(3000);
+          continue;
+        }
+        
+        // Don't throw error for battery check - just log it
+        this.log(`❌ Battery check ultimately failed after retries`);
+        return;
+      } finally {
+        this.operationInProgress = false;
+        this.forceDisconnect();
       }
-    } catch (error) {
-      this.log(`Battery check failed: ${error.message}`);
-    } finally {
-      this.operationInProgress = false;
-      this.forceDisconnect();
     }
   }
 
@@ -651,8 +696,9 @@ class MoesFingerbotAccessory {
       }, this.connectionTimeout);
 
       const disconnectHandler = (error) => {
-        this.log('❌ Device disconnected during connection');
+        this.log('❌ Device disconnected during connection setup');
         clearTimeout(connectionTimeout);
+        peripheral.removeListener('disconnect', disconnectHandler);
         this.currentPeripheral = null;
         reject(new Error('Device disconnected during connection'));
       };
@@ -669,43 +715,41 @@ class MoesFingerbotAccessory {
           return reject(error);
         }
 
-        this.log('✅ Connected successfully, waiting for stability...');
+        this.log('✅ Connected successfully, starting protocol immediately...');
         
-        // Wait longer for connection to stabilize
-        setTimeout(() => {
-          this.log('🔍 Discovering services...');
+        // Don't wait - start service discovery immediately to keep device engaged
+        this.log('🔍 Discovering services...');
+        
+        peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
+          clearTimeout(connectionTimeout);
+          peripheral.removeListener('disconnect', disconnectHandler);
           
-          peripheral.discoverAllServicesAndCharacteristics((error, services, characteristics) => {
-            clearTimeout(connectionTimeout);
-            peripheral.removeListener('disconnect', disconnectHandler);
-            
-            if (error) {
-              this.log(`❌ Service discovery error: ${error.message}`);
-              return reject(error);
-            }
+          if (error) {
+            this.log(`❌ Service discovery error: ${error.message}`);
+            return reject(error);
+          }
 
-            this.log(`📋 Found ${services.length} services and ${characteristics.length} characteristics`);
-            
-            // Find Tuya BLE characteristics
-            const writeChar = characteristics.find(char => char.uuid === '00002b11-0000-1000-8000-00805f9b34fb');
-            const notifyChar = characteristics.find(char => char.uuid === '00002b10-0000-1000-8000-00805f9b34fb');
+          this.log(`📋 Found ${services.length} services and ${characteristics.length} characteristics`);
+          this.log(`📋 Available characteristics: ${characteristics.map(c => c.uuid.replace('00002', '').replace('-0000-1000-8000-00805f9b34fb', '')).join(', ')}`);
+          
+          // Find Tuya BLE characteristics
+          const writeChar = characteristics.find(char => char.uuid === '00002b11-0000-1000-8000-00805f9b34fb');
+          const notifyChar = characteristics.find(char => char.uuid === '00002b10-0000-1000-8000-00805f9b34fb');
 
-            if (!writeChar) {
-              this.log('Available characteristics:', characteristics.map(c => c.uuid).join(', '));
-              return reject(new Error('Required write characteristic not found'));
-            }
+          if (!writeChar) {
+            this.log('❌ Required write characteristic 2b11 not found');
+            return reject(new Error('Required write characteristic not found'));
+          }
 
-            this.log(`✅ Using write characteristic: ${writeChar.uuid}`);
-            if (notifyChar) {
-              this.log(`✅ Using notify characteristic: ${notifyChar.uuid}`);
-            } else {
-              this.log('⚠️  No notify characteristic found');
-              return reject(new Error('Required notify characteristic not found'));
-            }
-
+          this.log(`✅ Using write characteristic: 2b11`);
+          if (notifyChar) {
+            this.log(`✅ Using notify characteristic: 2b10`);
             resolve({ peripheral, writeChar, notifyChar });
-          });
-        }, 6000); // Increased wait time for stability
+          } else {
+            this.log('❌ Required notify characteristic 2b10 not found');
+            reject(new Error('Required notify characteristic not found'));
+          }
+        });
       });
     });
   }
@@ -755,7 +799,7 @@ class MoesFingerbotAccessory {
             
             // Send pair request
             sequenceStep = 'pairing';
-            setTimeout(() => this.sendPairRequest(writeChar), 500);
+            setTimeout(() => this.sendPairRequest(writeChar), 200); // Reduced delay
           } else {
             reject(new Error('Device info request failed'));
           }
@@ -771,7 +815,7 @@ class MoesFingerbotAccessory {
             } else if (action === 'battery') {
               this.sendBatteryRequest(writeChar);
             }
-          }, 500);
+          }, 200); // Reduced delay
         } else if (sequenceStep === 'dp_commands' && result.code === 2) {
           // DP response
           this.log(`✅ DP command response received`);
@@ -956,7 +1000,7 @@ class MoesFingerbotAccessory {
           this.log(`❌ Write error: ${error.message}`);
           reject(error);
         } else {
-          setTimeout(() => resolve(), 50);
+          setTimeout(() => resolve(), 20); // Reduced from 50ms
         }
       });
     });
