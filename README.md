@@ -1,5 +1,10 @@
 # homebridge-moes-fingerbot
 
+After 150+ builds and diagnostics I have not been able to get the encrypted comms working with the fingerbot plus. :(
+
+You are welcome to work on this further!
+
+
 A [Homebridge](https://homebridge.io/) plugin for controlling MOES (Tuya-based) Fingerbot devices over Bluetooth.
 
 ## Features
